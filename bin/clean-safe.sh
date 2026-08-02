@@ -76,7 +76,17 @@ for branch in "$@"; do
     git worktree remove "$path"
   fi
 
-  git branch -d "$branch"
+  # -d (not -D): still refuses if the branch's own upstream tracking ref has
+  # commits not on this branch, even though we already confirmed it's merged
+  # into BASE — a real "someone pushed more since you last pulled" signal, not
+  # a bug to force past. But that's a per-branch refusal, not fatal: without
+  # this guard, `set -e` kills the whole loop and every later branch in the
+  # batch silently never gets processed. The worktree (if any) is already gone
+  # by this point; only the branch ref itself is left for manual follow-up.
+  if ! git branch -d "$branch"; then
+    echo "refusing $branch: git branch -d declined (see message above) — worktree removed, branch ref left for manual review" >&2
+    rc=1; continue
+  fi
 done
 
 git worktree prune
