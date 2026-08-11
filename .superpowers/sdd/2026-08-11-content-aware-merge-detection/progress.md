@@ -47,6 +47,32 @@ Task 3: complete (commits 3b5c5ae..2a50e7c, review clean — Approved, fix round
     breakage.
   - Regression: test-archive.sh 14/14, test-coverage.sh 10/10, test-lock.sh 5/5 all still pass.
 
+Task 4: complete (commits f08454d..a26369b, review clean — Approved, fix round 1/1)
+  - Implementer oc_msovexa8_2c230573 -> 1ac9d54 `feat(archive): add strict mode (refuse dirty,
+    atomic tag)` (8/8, self-reported). `--strict` refuses a dirty worktree (no WIP commit) and
+    tags atomically via `update-ref --stdin` (verify-before-create).
+  - Fix round 1/5 (oc_msovlhqv_b1c9630c, resumed implementer session): reviewer's one Important
+    finding (plan-error) — the brief's verbatim test scenarios 1 and 3 never reached the
+    strict-specific code at all: the pre-existing 2h in-flight gate (`activity_age_secs` vs
+    `IN_FLIGHT_SECS`) fired first because both scenarios' artifacts (a scratch file, a "moved"
+    commit) carried current-wall-clock timestamps, so the assertions passed vacuously — the
+    atomic transaction's core guarantee (abort on verify failure) was never actually exercised.
+    Independently verified against `bin/archive-branch.sh:60-100` and `bin/lib.sh:110-127`
+    before dispatching the fix. Fix: `WORKTREE_AUDIT_INFLIGHT_SECS=0` for the whole test file,
+    plus a deeper fix the implementer found beyond the original ask — scenario 3's branch move
+    happened before the script ran (not during), so `verify` had nothing to fail against; replaced
+    with a `git` shim on `$PATH` that moves the branch *inside* the `update-ref --stdin` call, so
+    the transaction's own verify step is what aborts. Also fixed 2 Minor findings (scenario 2 now
+    checks the tag resolves to the exact classified tip OID; "close the post-tag race" comment
+    reworded to "narrow", naming the residual `git worktree remove` gap). Committed a26369b.
+    Scoped re-review (oc_msow0c6g_13755c8a): Approved, no new breakage.
+  - Minor (deferred, non-blocking, noted by re-reviewer): fix report's stale commit-hash reference
+    (cites the pre-recovery sandbox hash, not the actually-landed one) — cosmetic, same as Task 3's
+    report; shim comment says "a tag ref is being created" but the condition matches any
+    `update-ref --stdin` (harmless, only call of that shape in the script).
+  - Regression: test-archive.sh 14/14, test-audit-content.sh 9/9, test-coverage.sh 10/10,
+    test-lock.sh 5/5 all still pass.
+
 Task 8: SCOPE EXPANDED 2026-08-11 (user decision) — not yet started, sequenced after Tasks 3-7.
   - Original Task 8 named only two PROSE consumers (orient-quick, finishing-a-development-branch-addendum).
     An ecosystem sweep found two CODE consumers with their own merge-detection implementations that the
