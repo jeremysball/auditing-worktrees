@@ -26,19 +26,18 @@ detect_base() {
   fi
 }
 
+# Echoes one of: a start-time string, "missing", or "unknown".
+#   missing - the process provably does not exist (procfs absence).
+#   unknown - /proc/<pid>/stat could not be read for any other reason.
 proc_start_ticks() {
-  # Field 22 of /proc/<pid>/stat is start time in clock ticks since boot.
-  # Field 2 (comm) is parenthesized and may itself contain spaces or parens,
-  # so field-count naively and it silently shifts. Strip through the *last*
-  # ") " instead and index from there.
   local pid="$1" stat rest
-  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  if [ ! -d "/proc/$pid" ]; then echo "missing"; return; fi
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || { echo "unknown"; return; }
   rest="${stat##*) }"
-  [ "$rest" != "$stat" ] || return 1
+  [ "$rest" != "$stat" ] || { echo "unknown"; return; }
   local -a f
   read -r -a f <<< "$rest"
-  # rest starts at original field 3 (state); field 22 (starttime) is index 19.
-  [ "${#f[@]}" -ge 20 ] || return 1
+  [ "${#f[@]}" -ge 20 ] || { echo "unknown"; return; }
   echo "${f[19]}"
 }
 
@@ -66,7 +65,9 @@ lock_status() {
   [[ "$reason" =~ start\ ([0-9]+) ]] && start="${BASH_REMATCH[1]}"
   if [ -z "$pid" ] || [ -z "$start" ]; then echo "unknown"; return; fi
   local live_start
-  if ! live_start=$(proc_start_ticks "$pid"); then echo "stale"; return; fi
+  live_start=$(proc_start_ticks "$pid") || { echo "unknown"; return; }
+  if [ "$live_start" = "missing" ]; then echo "stale"; return; fi
+  if [ "$live_start" = "unknown" ]; then echo "unknown"; return; fi
   if [ "$live_start" = "$start" ]; then echo "live"; else echo "stale"; fi
 }
 
