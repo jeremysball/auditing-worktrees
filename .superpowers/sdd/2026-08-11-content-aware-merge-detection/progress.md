@@ -142,3 +142,35 @@ Task 8: SCOPE EXPANDED 2026-08-11 (user decision) — not yet started, sequenced
     wires the first real caller. Documented now so it survives a context loss.
   - New sub-steps 3a-3e added to the plan, incl. a `bin/coverage-score` CLI entry point (todos.py is Python
     and cannot source a Bash function) and an explicit check that clean-safe.sh is NOT changed.
+
+Task 8 (this-repo scope: Steps 1, 2, 3a, 3e, 4): complete (commits 2c50a4c..2523a0f, fix round 1/5, review clean — Approved)
+  - Implementer oc_msox1pcj_b7ba2636 -> `48822b3` `feat(audit): add coverage-score CLI entry point
+    for non-bash consumers` + `20744fa` `docs: align config table and downstream notes with
+    content-aware detection`. Step 1: zero drift in docs/design.md (already accurate). Step 2:
+    SKILL.md config table gained WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD row; Step 5 text now names
+    `archive-branch.sh --strict` explicitly. Step 3a: `bin/coverage-score` CLI wrapper around
+    `coverage_score`, verdict on stdout, exit 0 on every verdict incl. UNSCORED/UNKNOWN, exit 2 on
+    usage error, `--help`, `tests/test-cli.sh` new. Step 3e: confirmed no `coverage_score` in
+    clean-safe.sh.
+  - Reviewer oc_msoxbysn_3dfe5b21: Approved overall but flagged 2 Important + 3 Minor findings —
+    Important findings enter the fix loop regardless of the overall Approved label (per process).
+  - Fix round 1/5: resumed implementer session (oc_msoxgk8u_7853698a) -> `2523a0f`
+    `fix(audit): reject unknown flags in any position for coverage-score`. Fixed: unknown-flag
+    rejection now scans all 3 positional args (was position-1-only, a silent-wrong-answer gap);
+    report's stale commit-hash table (9d17917/771ec99 -> 48822b3/20744fa); bad-repo-path now exits
+    2 not 1 with no raw `cd` stderr leak; added an UNKNOWN-verdict-exit-0 test case.
+  - Scoped re-review (oc_msoxj7w0_e636df91): all 4 findings ADDRESSED, no new breakage. Approved.
+  - Test verified independently, twice (pre- and post-fix): `bash tests/test-cli.sh` 15/15 then
+    24/24. Regression: all 8 sibling test files green both times (73 assertions pre-fix, 82
+    post-fix, 9/9 suites).
+  - Minor (deferred): `--` end-of-options marker rejected as `error: unknown flag --` — harmless
+    nit, CLI has no other flags to need the marker for.
+  - Minor (deferred): `tests/test-cli.sh` case 7 writes to a fixed `/tmp/cli-stderr` path instead
+    of the test's own `$SCRATCH` — a parallel-test-run collision nit, test-suite-only, not
+    production code.
+
+Task 8 (cross-repo scope: Steps 3b, 3c, 3d — orient/bin/scan-active.sh, jeeves/bin/todos.py,
+orient-quick/SKILL.md, finishing-a-development-branch-addendum/SKILL.md): NOT STARTED. Each lives
+in its own private submodule repo per the plan's explicit "separate PRs, each its own submodule
+repo" — handled as follow-up work in those repos' own worktrees/branches/PRs, not inside this
+plan's SDD loop.
