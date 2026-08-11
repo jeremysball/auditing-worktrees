@@ -86,20 +86,19 @@ kill "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
   [ "$(lock_status "$GITDIR/locked")" = "stale" ] && ok "dead pid -> stale" || bad "dead pid -> stale (wanted stale)"
 }
 
-echo "=== 5. unreadable proc record (not provably dead) -> unknown ==="
-# A pid that exists in proc but whose stat we cannot read: use pid 1's uid
-# trick is fragile, so simulate by making proc_start_ticks's cat fail via a
-# non-existent-but-claimed pid with a start that never matches and a cat that
-# fails. Concretely: an impossible start value against a live pid must be
-# stale (start mismatch), and a pid with no readable stat must be unknown.
-# We exercise "cat fails" by pointing at a path that is not readable.
-echo "pid 1 start 1" > "$GITDIR/locked"   # pid 1 exists but start won't match
-st=$(proc_start_ticks 1)
-[ "$st" = "unknown" ] && ok "pid1 unreadable-or-mismatch handled" || {
-  # pid 1's stat IS readable on most systems; if it read and mismatched,
-  # lock_status should say stale (mismatch). Either way it must not crash.
-  :
-}
+echo "=== 5. unreadable proc record (not provably dead) -> unknown, never stale ==="
+# Deterministic: override proc_start_ticks to simulate an unreadable /proc
+# (cat fails) and assert lock_status must return `unknown`, NOT `stale`.
+# A regression that maps unreadable->stale would let cleanup delete a
+# possibly-live lock, so this assertion is the load-bearing safety check.
+stub_unknown() { echo unknown; }
+proc_start_ticks() { stub_unknown; }
+echo "pid 99999 start 1" > "$GITDIR/locked"
+[ "$(lock_status "$GITDIR/locked")" = "unknown" ] \
+  && ok "unreadable proc -> unknown" \
+  || bad "unreadable proc mapped to something other than unknown"
+# restore the real function for any later scenarios
+unset -f proc_start_ticks stub_unknown
 
 echo
 echo "=== $pass passed, $fail failed ==="
@@ -170,8 +169,8 @@ git commit -m "fix(lib): make proc lock liveness three-state (missing/unknown/li
 - Consumes: git porcelain and the `ARCHIVE_PREFIX`-independent plain repo layout.
 - Produces:
   - `coverage_score "$repo" "$base" "$branch"` → echoes `SCORED <0-100 int>`, `UNSCORED <reason>`, or `UNKNOWN <reason>`.
-  - `merge_base "$base" "$branch"` → echoes the merge-base OID, or nothing.
-  - `merge_tree "$base" "$branch"` → echoes the simulated-merge tree OID, or nothing on conflict/error.
+  - `merge_base "$base" "$branch"` → echoes the merge-base OID, or nothing (errors on criss-cross multiple-merge-bases).
+  - `numstat_net` (reads numstat stdin) → echoes a net line delta or `UNSCORED <why>`.
 
 **Problem.** The ancestry check can't see squash/rebase merges. This task builds the scoring primitive: compute O (branch net text lines), R (residual from base to simulated merge), clamp, and compare as an integer inequality — marking unscored on binary/mode-only rows, O=0, conflict, error, or criss-cross.
 
@@ -254,34 +253,43 @@ exit "$fail"
 Run: `bash tests/test-coverage.sh`
 Expected: fails immediately — `coverage_score` is not defined.
 
-- [ ] **Step 3: Implement `merge_base` and `merge_tree`**
+- [ ] **Step 3: Implement `merge_base` (criss-cross-aware) and the shared numstat counter**
 
 Append to `bin/lib.sh`:
 
 ```bash
-# Echoes the merge-base of two refs, or nothing on error.
+# Echoes the singular merge-base of two refs, or nothing on error. In a
+# criss-cross history there are MULTIPLE merge bases; `git merge-base` without
+# --all errors ("multiple merge bases") rather than pick one. A caller must
+# detect that and treat the branch as unknown. Echoes the base OID on success.
 merge_base() {
   git merge-base "$1" "$2" 2>/dev/null
 }
 
-# Echoes the simulated-merge tree OID for a clean merge, or nothing on
-# conflict/error. Isolates the write so the repo's object store stays flat:
-# run with a temp object dir + the repo's objects as alternates.
-merge_tree() {
-  local repo="$1" base="$2" branch="$3" obj alt
-  obj=$(mktemp -d) || return 1
-  alt=$(git -C "$repo" rev-parse --path-format=absolute --git-path objects 2>/dev/null)
-  GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
-    git -C "$repo" merge-tree --write-tree "$base" "$branch" 2>/dev/null
-  local rc=$?
-  rm -rf "$obj"
-  return $rc
+# Sums net text lines from numstat input (added-minus-deleted). Echoes a string
+# on one line:
+#   "N"            - the net line delta, when every row is a normal text row.
+#   "UNSCORED <why>" - a `- -` (binary) or `0 0` (mode-only) row appeared.
+# Reads each row TAB-aware: numstat emits `add<TAB>del<TAB>path`; a naive
+# "${row##*$'\t'}" grabs the pathname, not the delete count.
+numstat_net() {
+  local total=0 row a d p
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r a d p <<< "$row"
+    if [ "$a" = "-" ] && [ "$d" = "-" ]; then { echo "UNSCORED binary"; return; }; fi
+    if [ "$a" = "0" ] && [ "$d" = "0" ]; then { echo "UNSCORED mode-only"; return; }; fi
+    total=$(( total + a - d ))
+  done
+  echo "$total"
 }
 ```
 
-Note: `merge_tree` is intentionally isolated to keep the repo's unreachable-object set unchanged (verified empirically). The temp object dir absorbs the new tree and is removed after.
+Note: `git diff --numstat` emits `- -` for a binary change and `0 0` for a mode-only (chmod) change; both make a line-count meaningless and force UNSCORED. The `$'\t'` ANSI-C quoting produces a real tab so the `case`/`IFS` matching works — a double-quoted `"\t"` is a literal backslash-t that never matches.
 
-- [ ] **Step 4: Implement `coverage_score`**
+- [ ] **Step 4: Implement `coverage_score` with the residual diff inside the object-dir scope**
+
+The residual diff MUST run in the same subprocess that has the temp object dir set as `GIT_OBJECT_DIRECTORY`. A `git merge-tree --write-tree` on genuinely-divergent history writes the synthesized tree only into that temp dir (verified empirically: after removing it, `git diff` fails `fatal: bad object`). So `coverage_score` runs merge-tree and the residual diff together inside one `git -C` invocation that sets the object dirs, not by returning a tree OID for a later diff.
 
 Append to `bin/lib.sh`:
 
@@ -289,51 +297,59 @@ Append to `bin/lib.sh`:
 # Echoes one of:
 #   SCORED <0-100>   - the branch's net text lines that are already in base.
 #   UNSCORED <why>   - binary/mode-only row, O==0, or empty patch.
-#   UNKNOWN <why>    - criss-cross history, merge conflict, or merge-tree error.
+#   UNKNOWN <why>    - criss-cross history, merge conflict, merge-tree error.
 coverage_score() {
-  local repo="$1" base="$2" branch="$3"
-  local mb residual merged_tree rc out
+  local repo="$1" base="$2" branch="$3" mb out O R num
   mb=$(merge_base "$base" "$branch") || { echo "UNKNOWN no-merge-base"; return; }
   [ -n "$mb" ] || { echo "UNKNOWN no-merge-base"; return; }
 
   # O: net text lines on the branch from its merge base.
-  # `- -` (binary) or `0 0` (mode-only) rows force UNSCORED.
   out=$(git diff --no-ext-diff --no-textconv --numstat --no-renames "$mb" "$branch" 2>/dev/null) || { echo "UNKNOWN branch-diff-failed"; return; }
-  local O=0 row_add row_del
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    case "$row" in
-      "-\t-"*) { echo "UNSCORED binary-in-branch"; return; } ;;
-      "0\t0"*) { echo "UNSCORED mode-only-in-branch"; return; } ;;
-    esac
-    row_add="${row%%$'\t'*}"; row_del="${row##*$'\t'}"
-    O=$(( O + row_add - row_del ))
-  done <<< "$out"
+  O=$(numstat_net <<< "$out")
+  case "$O" in
+    UNSCORED*) { echo "$O-in-branch"; return; } ;;
+  esac
   [ "$O" -gt 0 ] || { echo "UNSCORED no-text-rows"; return; }
 
-  # Simulated merge tree; conflict (rc 1) or error (>1) -> UNKNOWN.
-  merged_tree=$(merge_tree "$repo" "$base" "$branch"); rc=$?
-  if [ "$rc" -eq 1 ]; then { echo "UNKNOWN merge-conflict"; return; }; fi
-  if [ "$rc" -gt 1 ]; then { echo "UNKNOWN merge-tree-error"; return; }; fi
-  [ -n "$merged_tree" ] || { echo "UNKNOWN no-merge-tree"; return; }
+  # Simulated merge + residual diff in ONE subprocess so the synthesized tree
+  # stays reachable. Capture merge-tree's rc separately from its output, then
+  # run the diff only on success — all inside a subshell that keeps the object
+  # dir live. merge-tree rc 1 = conflict, >1 = error -> UNKNOWN.
+  local obj alt base_oid mtrc tree residual
+  obj=$(mktemp -d) || { echo "UNKNOWN no-temp-dir"; return; }
+  alt=$(git -C "$repo" rev-parse --path-format=absolute --git-path objects 2>/dev/null)
+  base_oid=$(git -C "$repo" rev-parse "$base" 2>/dev/null)
+  set +e
+  residual=$(
+    tree=$(GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
+      git -C "$repo" merge-tree --write-tree "$base" "$branch" 2>/dev/null)
+    mtrc=$?
+    echo "RC=$mtrc"
+    [ "$mtrc" -eq 0 ] && [ -n "$tree" ] || exit "$mtrc"
+    GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
+      git -C "$repo" diff --no-ext-diff --no-textconv --numstat --no-renames "$base_oid" "$tree" 2>/dev/null
+  )
+  rc=$?
+  set -e
+  rm -rf "$obj"
+  mtrc=$(printf '%s\n' "$residual" | grep -o '^RC=[0-9]*' | head -1 | cut -d= -f2)
+  residual=$(printf '%s\n' "$residual" | grep -v '^RC=[0-9]*')
+  if [ "${mtrc:-0}" -eq 1 ]; then { echo "UNKNOWN merge-conflict"; return; }; fi
+  if [ "${mtrc:-0}" -gt 1 ] || [ "$rc" -gt 1 ]; then { echo "UNKNOWN merge-tree-error"; return; }; fi
 
-  # R: residual text lines still required from base to the simulated merge.
-  out=$(git diff --no-ext-diff --no-textconv --numstat --no-renames "$base" "$merged_tree" 2>/dev/null) || { echo "UNKNOWN residual-diff-failed"; return; }
-  local R=0
-  while IFS= read -r row; do
-    [ -n "$row" ] || continue
-    case "$row" in
-      "-\t-"*|"0\t0"*) { echo "UNSCORED residual-binary-or-mode"; return; } ;;
-    esac
-    row_add="${row%%$'\t'*}"; row_del="${row##*$'\t'}"
-    R=$(( R + row_add - row_del ))
-  done <<< "$out"
+  R=$(numstat_net <<< "$residual")
+  case "$R" in
+    UNSCORED*) { echo "UNSCORED $R"; return; } ;;
+  esac
 
-  local num den
   num=$(( O - R )); [ "$num" -lt 0 ] && num=0
   echo "SCORED $(( num * 100 / O ))"
 }
 ```
+
+Note: `merge-tree --write-tree` prints the resulting tree OID on stdout; the pipeline reads it and immediately diffs against it while `GIT_OBJECT_DIRECTORY="$obj"` is still in effect, then the temp dir is removed. This keeps the repo's unreachable-object set unchanged (the synthesized tree lives only in `$obj`) while still letting the residual diff resolve it.
+
+Criss-cross: `merge_base` uses singular `git merge-base`, which errors ("multiple merge bases") on a criss-cross history, so `coverage_score` returns `UNKNOWN no-merge-base` — the branch is never scored against merge-tree's virtual base. If singular `git merge-base` ever returns an OID while merge-tree uses a different virtual base, the residual would be off — treat that case conservatively as UNKNOWN (the singular-merge-base error path already covers the common criss-cross).
 
 - [ ] **Step 5: Run the test to verify it passes**
 
@@ -387,11 +403,16 @@ echo "=== 1. squash-merged branch reports as likely-content-merged ==="
 git checkout -qb sq main
 echo sq > sq.txt; git add -A
 GIT_COMMITTER_DATE="$OLD" GIT_AUTHOR_DATE="$OLD" git commit -qm sq
+SQ_OID=$(git rev-parse sq)   # capture the branch tip BEFORE we detach it
 git checkout -q main
 echo sq > sq.txt; git add -A; git commit -qm "sq landing on main"
-git branch -D -q sq  # drop the original branch so only the landing remains? No—keep it; we re-create under same name:
-# (re-create the branch pointing at the old commit so the report sees it as non-ancestor)
-git branch sq "$(git log --all --format='%H' --grep='^sq$' | head -1)"
+# Re-create `sq` pointing at its ORIGINAL (now-unmerged) commit so the report
+# sees a non-ancestor branch whose content is already in main. Reattaching the
+# captured OID directly is deterministic; searching history by message after
+# deleting the branch can select the landing commit (making sq a literal
+# ancestor) or nothing at all.
+git branch -D -q sq
+git branch sq "$SQ_OID"
 out=$("$BIN/audit-worktrees.sh" "$T")
 printf '%s' "$out" | grep -q "likely-content-merged" && ok "content-merged bucket present" || bad "no content-merged bucket: $out"
 
@@ -400,7 +421,7 @@ echo "=== $pass passed, $fail failed ==="
 exit "$fail"
 ```
 
-(Scenario 1's branch re-creation is intentionally rough — the point is a non-ancestor branch whose content is already in main must appear under `likely-content-merged`, not `needs-triage`.)
+(Scenario 1 reattaches the captured pre-delete OID so `sq` is guaranteed a non-ancestor branch whose content is already in main — deterministic, and it must appear under `likely-content-merged`, not `needs-triage`.)
 
 - [ ] **Step 2: Run the test to verify it fails**
 
@@ -409,17 +430,14 @@ Expected: fails — no `likely-content-merged` output yet; the branch lands in `
 
 - [ ] **Step 3: Add the content pass to the classification loop**
 
-In `bin/audit-worktrees.sh`, add a `--no-content` flag and a threshold read near the top (after the `source` line):
+In `bin/audit-worktrees.sh`, add a `--no-content` flag and a fixed default threshold near the top (after the `source` line). Task 7 introduces the env-configurable, validated threshold; for now the classification uses the default so the feature is testable without config plumbing:
 
 ```bash
 NO_CONTENT=false
 if [ "${1:-}" = "--no-content" ]; then NO_CONTENT=true; shift; fi
 ROOT="${1:-$(pwd)}"
 
-CONTENT_MERGE_THRESHOLD="${WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD:-95}"
-case "$CONTENT_MERGE_THRESHOLD" in
-  ''|*[!0-9]*) CONTENT_MERGE_THRESHOLD=95 ;;   # Task 7 hardens this to a defined outcome
-esac
+CONTENT_MERGE_THRESHOLD=95   # Task 7 makes this env-configurable + validated
 ```
 
 (Note: `ROOT` was previously `ROOT="${1:-$(pwd)}"` at line 17 — move it to after the flag shift so `--no-content` doesn't get consumed as the root path.)
@@ -427,7 +445,7 @@ esac
 Then, in the loop where `merged` is computed (currently lines 74-83), after the ancestry check says `merged=false`, insert (guarded by `NO_CONTENT`):
 
 ```bash
-    local content_merged=false
+    local content_merged=false unscored=false
     if [ "$NO_CONTENT" = false ]; then
       local score
       score=$(coverage_score "$repo" "$base" "$branch")
@@ -437,17 +455,24 @@ Then, in the loop where `merged` is computed (currently lines 74-83), after the 
           if [ "$pct" -ge "$CONTENT_MERGE_THRESHOLD" ]; then content_merged=true; fi
           ;;
         UNSCORED*|UNKNOWN*)
-          # Unscored / unknown -> cannot call it shipped; leave as unmerged.
+          # Unscored / unknown -> cannot prove it shipped. It must go to
+          # needs-triage, NEVER archaeology (never batch-archived) and never
+          # clean-safe. Record the flag so the split below forces triage.
+          unscored=true
+          reason="$reason, ${score%% *}"
           ;;
       esac
     fi
 ```
 
-Then add a new bucket array and branch: at the bucket declarations (line 56) add `content_merged=()`. In the merged/unmerged branch (after line 123), add:
+Then add a new bucket array and branch: at the bucket declarations (line 56) add `content_merged=()`. In the merged/unmerged branch (after line 123), replace the archaeology/triage split with:
 
 ```bash
     if [ "$content_merged" = true ]; then
       content_merged+=("$desc — content-merged (work already in base, different hash)")
+    elif [ "$unscored" = true ]; then
+      # Unscored or unknown coverage: needs-triage, never archaeology.
+      triage+=("$desc — $reason")
     elif [ "$age" -ge "$ARCHAEOLOGY_SECS" ] && [ -z "${has_upstream[$branch]:-}" ]; then
       archaeology+=("$desc — $reason, never pushed")
     else
@@ -455,12 +480,22 @@ Then add a new bucket array and branch: at the bucket declarations (line 56) add
     fi
 ```
 
-(replacing the current archaeology/triage split for the unmerged path), and in the report-emit section (after the archaeology block, ~line 158) add:
+and in the report-emit section (after the archaeology block, ~line 158) add:
 
 ```bash
   if [ ${#content_merged[@]} -gt 0 ]; then
     echo "  likely-content-merged (work already in base under a different hash — batch archive):"
     printf '    %s\n' "${content_merged[@]}"
+  fi
+```
+
+**Early-return guard:** the existing actionable-output guard (lines 141-143) returns silently when `safe`, `triage`, `archaeology`, `hands-off`, `unknown_merge`, and `prunable` are all empty. A repo whose only finding is a content-merged branch would otherwise print nothing. Add `content_merged` to that guard's empty-check:
+
+```bash
+  if [ ${#safe[@]} -eq 0 ] && [ ${#triage[@]} -eq 0 ] && [ ${#archaeology[@]} -eq 0 ] \
+     && [ ${#handsoff[@]} -eq 0 ] && [ ${#unknown_merge[@]} -eq 0 ] && [ ${#prunable[@]} -eq 0 ] \
+     && [ ${#content_merged[@]} -eq 0 ]; then
+    return
   fi
 ```
 
@@ -529,16 +564,20 @@ git checkout -q main
 [ "$check" -eq 0 ] && ok "strict archives clean" || bad "strict failed clean (rc=$check)"
 git show-ref --verify --quiet refs/tags/archive/clean && ok "tag created" || bad "no tag"
 
-echo "=== 3. non-strict still commits WIP (existing behavior preserved) ==="
-git checkout -qb old dirty
-echo more > o.txt; git add -A
-GIT_COMMITTER_DATE="$OLD" GIT_AUTHOR_DATE="$OLD" git commit -qm old
+echo "=== 3. strict aborts atomically when the branch moves mid-archive ==="
+git checkout -qb race main
+echo r > r.txt; git add -A
+GIT_COMMITTER_DATE="$OLD" GIT_AUTHOR_DATE="$OLD" git commit -qm race
+RACE_OID=$(git rev-parse race)
 git checkout -q main
-git worktree add -q "$WT/wt2" old
-echo PRECIOUS > "$WT/wt2/extra.txt"
-"$BIN/archive-branch.sh" "$T" old; check=$?
-[ "$check" -eq 0 ] && ok "generic archives dirty" || bad "generic failed dirty (rc=$check)"
-git show-ref --verify --quiet refs/tags/archive/old && ok "generic tag created" || bad "no generic tag"
+# Simulate a concurrent commit landing on the branch between classification
+# and the atomic tag: point the branch at a NEW commit.
+git branch -f race main
+echo moved > moved.txt; git add -A; git commit -qm "race moved"; git update-ref refs/heads/race HEAD
+"$BIN/archive-branch.sh" --strict "$T" race 2>/dev/null; check=$?
+[ "$check" -eq 1 ] && ok "strict refuses a moved branch" || bad "strict did not refuse moved branch (rc=$check)"
+git show-ref --verify --quiet refs/tags/archive/race && bad "tag created despite branch move" || ok "no tag created for moved branch"
+git show-ref --verify --quiet refs/heads/race && ok "branch preserved" || bad "branch deleted!"
 
 echo
 echo "=== $pass passed, $fail failed ==="
@@ -588,16 +627,16 @@ Replace the tag-create + verify block (lines 95-108) with:
   fi
 
   tip=$(git rev-parse "refs/heads/$branch")
-  zero="0000000000000000000000000000000000000000"
 
   if [ "$STRICT" = true ]; then
-    # Atomic: verify the branch still points at `tip`, then create the tag in
-    # one all-or-nothing transaction. The `create` line takes the new-value OID
-    # then the old-value OID (all-zero for a create). Verified empirically: the
-    # whole transaction aborts if the verify fails, leaving the branch and tag
-    # untouched.
-    if ! printf 'start\nverify refs/heads/%s %s\ncreate refs/tags/%s %s %s\nprepare\ncommit\n' \
-        "$branch" "$tip" "$tag" "$tip" "$zero" | git update-ref --stdin 2>/dev/null; then
+    # Atomic: verify the branch still points at `tip`, then create the tag, all
+    # in one transaction. `create` takes ONE OID (ref + new-value); `verify`
+    # takes the expected old-value. Empirically verified: the whole transaction
+    # aborts (rc 128) if the verify fails, leaving the branch and the would-be
+    # tag untouched. A concurrent commit that moved the branch therefore blocks
+    # the tag entirely — no stale tag is created.
+    if ! printf 'start\nverify refs/heads/%s %s\ncreate refs/tags/%s %s\nprepare\ncommit\n' \
+        "$branch" "$tip" "$tag" "$tip" | git update-ref --stdin 2>/dev/null; then
       echo "refusing $branch: branch moved during archive (atomic tag aborted) — not deleting" >&2
       rc=1; continue
     fi
@@ -608,12 +647,22 @@ Replace the tag-create + verify block (lines 95-108) with:
       rc=1; continue
     fi
   fi
+
+  # Close the post-tag race: the atomic transaction pinned the branch at `tip`
+  # and created the tag there, but a concurrent commit after that but before
+  # `git branch -D` would make `-D` delete the NEW tip while the tag keeps the
+  # old one, stranding the new tip unreachable. Re-verify immediately before
+  # the destructive steps (worktree remove + branch -D) that follow.
+  if [ "$(git rev-parse "refs/heads/$branch" 2>/dev/null)" != "$tip" ]; then
+    echo "refusing $branch: branch advanced after tagging (now $(git rev-parse --short refs/heads/$branch), expected $tip) — worktree/branch left in place" >&2
+    rc=1; continue
+  fi
 ```
 
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `bash tests/test-archive-strict.sh`
-Expected: scenario 1 refuses dirty; scenario 2 archives clean and creates the tag; scenario 3 (generic) still WIP-commits.
+Expected: scenario 1 refuses dirty (no WIP commit, branch + file intact); scenario 2 archives clean and creates the tag; scenario 3 (branch moved) aborts atomically — no tag, branch preserved.
 
 - [ ] **Step 6: Commit**
 
@@ -699,13 +748,16 @@ git commit -m "test(clean): pin that clean-safe stays literal-ancestry-only"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test-hook-parse.sh`:
+Create `tests/test-hook-parse.sh`. The test sources the REAL parser (`bin/summary-parser.sh`, added in Step 3) so it exercises production code, not a hand-copied awk program:
 
 ```bash
 #!/usr/bin/env bash
-# Simulates the report body and checks the awk parser's bucket assignment.
+# Feeds a realistic report body through the real summary parser and checks the
+# bucket assignment. Exercises production code, not a copied awk program.
 set -uo pipefail
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
+# shellcheck source=../bin/summary-parser.sh
+source "$BIN/summary-parser.sh"
 
 pass=0; fail=0
 ok()  { echo "  PASS: $1"; pass=$((pass+1)); }
@@ -718,28 +770,12 @@ report='=== /tmp/repo (base: main) ===
     feat/y  [idle 5h] — unmerged
 '
 
-echo "=== 1. a likely-content-merged heading is not counted as needs-triage ==="
-sum=$(printf '%s\n' "$report" | awk '
-  /^=== / { if (repo != "") emit(); repo=$2; s=t=a=h=cm=0; next }
-  /^  likely-content-merged/ { m="cm"; next }
-  /^  needs-triage/          { m="t"; next }
-  /^  safe-to-clean/         { m="s"; next }
-  /^  archaeology/           { m="a"; next }
-  /^  hands-off/             { m="h"; next }
-  /^  \(/                    { m="" }
-  /^    / { if (m=="s") s++; else if (m=="t") t++; else if (m=="a") a++; else if (m=="h") h++; else if (m=="cm") cm++ }
-  function emit(   parts) {
-    parts=""
-    if (t) parts = parts sprintf("%d triage, ", t)
-    if (cm) parts = parts sprintf("%d content-merged, ", cm)
-    if (s) parts = parts sprintf("%d safe-to-clean, ", s)
-    if (h) parts = parts sprintf("%d hands-off, ", h)
-    if (parts != "") { sub(/, $/, "", parts); printf "  %s: %s\n", repo, parts }
-  }
-  END { if (repo != "") emit() }
-')
+echo "=== 1. a likely-content-merged heading is counted, not conflated with needs-triage ==="
+sum=$(summary_parse "$report")
 printf '%s' "$sum" | grep -q "1 content-merged" && ok "content-merged counted" || bad "content-merged not counted: $sum"
-printf '%s' "$sum" | grep -q "triage" && { echo "  note: triage counted too (branch desc mentions content-merged)"; }
+# The branch description mentions 'content-merged' but must NOT bump needs-triage
+printf '%s' "$sum" | grep -q "1 triage" && ok "triage still counts its own heading" || bad "triage not counted: $sum"
+printf '%s' "$sum" | grep -q "2 triage" && bad "branch desc leaked into triage" || ok "branch desc did not leak into triage"
 
 echo
 echo "=== $pass passed, $fail failed ==="
@@ -751,12 +787,21 @@ exit "$fail"
 Run: `bash tests/test-hook-parse.sh`
 Expected: with a bare `/content-merged/` matcher the branch line `content-merged (work already in base...)` would match before the heading logic resets `m`; the anchored matcher in Step 3 fixes it. Run once to see it fail, then fix.
 
-- [ ] **Step 3: Anchor the awk parsers in `session-hook.sh`**
+- [ ] **Step 3: Extract the summary parser into a sourced unit**
 
-Replace the awk block (lines 54-71) so each matcher anchors to the heading position (leading two-space indent + name + colon). The key changes: match `^  likely-content-merged`, `^  needs-triage`, etc., and add a `cm` counter alongside `s/t/a/h`:
+Create `bin/summary-parser.sh` — a sourced file exposing `summary_parse`. The parser is anchored to heading position (exactly two leading spaces + the bucket name + colon), so a branch description that merely *contains* the word `content-merged` (four-space indent) can never set the bucket. This makes the parser a real tested unit rather than an inline awk that the test can only copy.
 
 ```bash
-  summary=$(printf '%s\n' "$out" | awk '
+#!/usr/bin/env bash
+# Sources, don't execute. summary_parse "$report" collapses a multi-repo audit
+# report into one line per repo with per-bucket counts. Bucket headings are
+# matched structurally (two-space indent + name + colon) so a branch description
+# that mentions a bucket name can never set the current bucket.
+#
+# Usage: summary=$(summary_parse "$out")
+
+summary_parse() {
+  printf '%s\n' "$1" | awk '
     /^=== / { if (repo != "") emit(); repo=$2; s=t=a=h=cm=0; next }
     /^  safe-to-clean/           { m="s"; next }
     /^  needs-triage/            { m="t"; next }
@@ -775,10 +820,20 @@ Replace the awk block (lines 54-71) so each matcher anchors to the heading posit
       if (parts != "") { sub(/, $/, "", parts); printf "  %s: %s\n", repo, parts }
     }
     END { if (repo != "") emit() }
-  ')
+  '
+}
 ```
 
-The branch line inside a bucket still begins with four spaces (`    `) and is only counted under whatever heading `m` currently holds — a branch description that *contains* the word `content-merged` (four-space indent) can no longer set `m`, because the heading matcher requires exactly two leading spaces and the colon.
+Then in `session-hook.sh`, replace the inline awk (lines 54-71) with a source + call:
+
+```bash
+# shellcheck source=summary-parser.sh
+source "$(dirname "${BASH_SOURCE[0]}")/summary-parser.sh"
+...
+  summary=$(summary_parse "$out")
+```
+
+The heading matchers require exactly two leading spaces and the bucket name before the colon; a branch line (`    ...` — four spaces) is only counted under whatever heading `m` currently holds.
 
 - [ ] **Step 4: Pass `--no-content` and surface the timeout explicitly**
 
@@ -868,32 +923,40 @@ Expected: fails — `validate_pct` is not defined.
 Append to `bin/lib.sh`:
 
 ```bash
-# Echoes the base-10 integer value, or "invalid" (never a Bash octal read).
+# Echoes the base-10 integer value, or "invalid". Strict decimal: rejects
+# leading zeros ("08" is invalid, not 8 — a bare Bash arithmetic read would
+# treat it as octal and silently change its meaning). Never emits a non-numeric
+# string that a caller could feed to $(( )).
 validate_pct() {
   local val="$1"
   case "$val" in
     ''|*[!0-9]*) echo invalid; return ;;
+    # a leading zero with more than one digit is octal-looking -> invalid
+    '0'*) [ "$val" = "0" ] || { echo invalid; return; } ;;
   esac
-  # strip leading zeros so "08" is 8, not an octal error
-  val=$((10#$val))
-  if [ "$val" -ge 0 ] && [ "$val" -le 100 ]; then echo "$val"; else echo invalid; fi
+  local n
+  n=$((val))            # safe: matched ^[0-9]+$ with no leading zero
+  if [ "$n" -ge 0 ] && [ "$n" -le 100 ]; then echo "$n"; else echo invalid; fi
 }
 ```
 
-- [ ] **Step 4: Use it in `audit-worktrees.sh`**
+- [ ] **Step 4: Use it in `audit-worktrees.sh` (distinguish unset from empty)**
 
-Replace the Task 3 threshold read (lines added there) with a validated one:
+Replace Task 3's hardcoded `CONTENT_MERGE_THRESHOLD=95` with one that distinguishes an **unset** variable (→ default 95, the common case) from an explicitly **set-but-invalid** value (empty string, `08`, `abc`, `101` → defined hard error to stderr + fallback 95, never a silent octal read):
 
 ```bash
-CONTENT_MERGE_THRESHOLD="${WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD:-95}"
-CONTENT_MERGE_THRESHOLD=$(validate_pct "$CONTENT_MERGE_THRESHOLD")
-if [ "$CONTENT_MERGE_THRESHOLD" = "invalid" ]; then
-  echo "  (skipped: WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD must be an integer 0-100, got '$WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD')" >&2
-  CONTENT_MERGE_THRESHOLD=95
+if [ -z "${WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD+x}" ]; then
+  CONTENT_MERGE_THRESHOLD=95                     # unset -> default
+else
+  CONTENT_MERGE_THRESHOLD=$(validate_pct "$WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD")
+  if [ "$CONTENT_MERGE_THRESHOLD" = "invalid" ]; then
+    echo "  (skipped: WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD must be an integer 0-100 with no leading zero, got '$WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD')" >&2
+    CONTENT_MERGE_THRESHOLD=95
+  fi
 fi
 ```
 
-(An invalid threshold is a defined outcome: the audit prints the misconfiguration to stderr, falls back to 95, and proceeds — never an octal abort.)
+(An invalid threshold is a defined outcome: the audit prints the misconfiguration to stderr, falls back to 95, and proceeds — never a Bash octal read, never a silently reinterpreted leading-zero value.)
 
 - [ ] **Step 5: Run the test to verify it passes**
 
@@ -923,10 +986,10 @@ git commit -m "feat(audit): validate the content-merge threshold strict decimal"
 
 - [ ] **Step 1: Verify this repo's docs match implementation**
 
-Run: `rg -n "likely-content-merged|strict|WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD" docs/design.md SKILL.md`
+Run (scoped to THIS repo, not `~/.claude`): `rg -n "likely-content-merged|strict|WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD" docs/design.md SKILL.md`
 Expected: the design and SKILL.md already describe the content-merged bucket, strict archive, and threshold. If any naming drifted during implementation, fix it here.
 
-- [ ] **Step 2: Update `SKILL.md` Configuration table**
+- [ ] **Step 2: Update `SKILL.md` Configuration table and wire strict archive**
 
 Add the new threshold to the config table (currently lines 186-192):
 
@@ -934,9 +997,23 @@ Add the new threshold to the config table (currently lines 186-192):
 | `WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD` | `95` | Coverage % above which a non-ancestor branch is treated as content-merged (batch archive) |
 ```
 
+And in Step 5, where content-merged branches are routed to archive, name the strict path explicitly so a dirty content-merged worktree is refused rather than WIP-committed:
+
+```markdown
+Group every content-merged branch into one archive-and-delete confirmation using
+`archive-branch.sh --strict <repo> <branch>...` (NOT the generic archive path):
+strict mode refuses a dirty worktree instead of committing WIP, and tags atomically.
+If strict refuses a branch (dirty worktree), resolve that branch by hand — do not
+fall back to the generic WIP-committing archive path for it.
+```
+
 - [ ] **Step 3: Open follow-up PRs for the cross-repo consumers**
 
-In the `~/.claude` parent repo's own worktree, add the `likely-content-merged` bucket to `orient-quick/SKILL.md` (the bucket list around lines 110-124) and `finishing-a-development-branch-addendum/SKILL.md` (lines 40-58), routing content-merged → archive with explicit precedence (content-merged → archive, never clean-safe). These are separate PRs because they live in the parent repo.
+The downstream consumers live in their own repos (submodules of the `~/.claude` parent), so their updates are separate PRs. Add the `likely-content-merged` bucket to:
+- `skills/orient-quick/SKILL.md` — the safe-to-clean / needs-triage / hands-off / archaeology mapping and its "what to do" instructions.
+- `skills/finishing-a-development-branch-addendum/SKILL.md` — the cleanup-flow handoff.
+
+in each consumer's own repo worktree, routing content-merged → archive with explicit precedence (content-merged → archive, never clean-safe). These are separate PRs because they live in separate repos.
 
 - [ ] **Step 4: Commit this repo's doc changes**
 
