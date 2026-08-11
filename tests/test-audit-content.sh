@@ -52,9 +52,14 @@ printf '%s' "$out" | grep -q "needs-triage" && ok "other in needs-triage" || bad
 printf '%s' "$out" | grep -q "other" && ok "other named in report" || bad "other missing from report: $out"
 
 echo "=== 4. binary-only branch (UNSCORED) routes to needs-triage, never archaeology ==="
+# The commit must be archaeology-eligible (older than ARCHAEOLOGY_SECS, never
+# pushed) so this scenario actually exercises the unscored-never-archaeology
+# ordering: without the `elif [ "$unscored" = true ]` branch, `bin` would land
+# in archaeology via the age+no-upstream check, not in needs-triage.
+OLD_ARCH=$(date -d "100 days ago" --iso-8601=seconds)
 git checkout -qb bin main
 printf '\x00\x01\x02' > blob.bin; git add -A
-GIT_COMMITTER_DATE="$OLD" GIT_AUTHOR_DATE="$OLD" git commit -qm binary
+GIT_COMMITTER_DATE="$OLD_ARCH" GIT_AUTHOR_DATE="$OLD_ARCH" git commit -qm binary
 git checkout -q main
 out=$("$BIN/audit-worktrees.sh" "$T")
 printf '%s' "$out" | grep -q "needs-triage" && ok "bin in needs-triage" || bad "bin not in needs-triage: $out"

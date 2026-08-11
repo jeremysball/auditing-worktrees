@@ -138,3 +138,106 @@ guard, and commit message follow the brief verbatim.
 `feat(audit): classify content-merged branches into their own bucket` —
 includes `bin/audit-worktrees.sh`, `tests/test-audit-content.sh`, and this
 report.
+
+## Fix round 1 (review finding: scenario 4 never exercised unscored routing)
+
+**Date:** 2026-08-11
+**Commit:** `test(audit): make scenario 4 actually exercise unscored-never-archaeology ordering`
+
+### Finding
+
+Scenario 4's `bin` branch was only ~3 hours old (no date override), but
+`ARCHAEOLOGY_SECS` defaults to 90 days — so `bin` was never
+archaeology-eligible and landed in `needs-triage` via the final `else`
+clause regardless of whether the `elif [ "$unscored" = true ]` branch
+existed. Both assertions passed on code *without* that branch; the scenario
+only caught a crash on UNSCORED branches, not the unscored-beats-archaeology
+ordering it claimed to verify.
+
+### Fix chosen
+
+Made the `bin` commit archaeology-eligible by dating it 100 days ago
+(`OLD_ARCH=$(date -d "100 days ago" --iso-8601=seconds)`, applied via
+`GIT_COMMITTER_DATE`/`GIT_AUTHOR_DATE`), with a comment explaining why. Chose
+this over exporting `WORKTREE_AUDIT_ARCHAEOLOGY_SECS=0` for the whole test
+because it targets the exact condition (an old, never-pushed, unscored
+branch) without changing the environment for scenarios 1-3 — those assert
+*absence* of archaeology for 3-hour-old branches, and a global
+`ARCHAEOLOGY_SECS=0` would make every branch archaeology-eligible, silently
+weakening those assertions too. The per-scenario date override keeps each
+scenario's archaeology-eligibility explicit and independent.
+
+### Confirmed the fixed scenario catches the regression
+
+Temporarily reordered the split in `bin/audit-worktrees.sh` so the
+age+no-upstream archaeology check runs *before* the `unscored` check (the
+regression the finding describes), then ran the test:
+
+**Command run:** `bash tests/test-audit-content.sh`
+
+**Output (regression-confirming run, reordered code):**
+
+```
+=== 1. squash-merged branch reports as likely-content-merged ===
+  PASS: content-merged bucket present
+  PASS: sq listed under content-merged
+  PASS: sq not in needs-triage
+=== 2. --no-content skips the coverage pass (ancestry-only) ===
+  PASS: no content bucket with --no-content
+  PASS: sq back in needs-triage without content pass
+=== 3. genuinely unmerged branch stays in needs-triage (SCORED 0) ===
+  PASS: other in needs-triage
+  PASS: other named in report
+=== 4. binary-only branch (UNSCORED) routes to needs-triage, never archaeology ===
+  PASS: bin in needs-triage
+  FAIL: bin leaked into archaeology: === /tmp/tmp.X4mr4hyBN6/repo (base: main) ===
+  needs-triage:
+    other  [idle 3h] — unmerged
+  archaeology (older than 90d, never pushed — batch archive):
+    bin  [idle 100d] — unmerged, UNSCORED, never pushed
+  likely-content-merged (work already in base under a different hash — batch archive):
+    sq  [idle 3h] — content-merged (work already in base, different hash)
+
+=== 8 passed, 1 failed ===
+```
+
+Exit code 1 — `bin` leaks into archaeology exactly as the finding predicted,
+so the fixed scenario catches the regression. The reorder was then reverted
+(`bin/audit-worktrees.sh` restored byte-identical; `git diff` clean).
+
+### Final passing run
+
+**Command run:** `bash tests/test-audit-content.sh`
+
+**Output:**
+
+```
+=== 1. squash-merged branch reports as likely-content-merged ===
+  PASS: content-merged bucket present
+  PASS: sq listed under content-merged
+  PASS: sq not in needs-triage
+=== 2. --no-content skips the coverage pass (ancestry-only) ===
+  PASS: no content bucket with --no-content
+  PASS: sq back in needs-triage without content pass
+=== 3. genuinely unmerged branch stays in needs-triage (SCORED 0) ===
+  PASS: other in needs-triage
+  PASS: other named in report
+=== 4. binary-only branch (UNSCORED) routes to needs-triage, never archaeology ===
+  PASS: bin in needs-triage
+  PASS: bin not in archaeology
+
+=== 9 passed, 0 failed ===
+```
+
+Exit code 0.
+
+### Regression suites
+
+- `bash tests/test-archive.sh` → 14 passed, 0 failed (rc 0)
+- `bash tests/test-coverage.sh` → 10 passed, 0 failed (rc 0)
+- `bash tests/test-lock.sh` → 5 passed, 0 failed (rc 0)
+
+### Commit
+
+`test(audit): make scenario 4 actually exercise unscored-never-archaeology ordering` —
+includes `tests/test-audit-content.sh` and this report section.
