@@ -134,3 +134,81 @@ human_age() {
   else                           echo "$(( s / 86400 ))d"
   fi
 }
+
+# Echoes the singular merge-base of two refs, or nothing on error. In a
+# criss-cross history there are MULTIPLE merge bases; `git merge-base` without
+# --all errors ("multiple merge bases") rather than pick one. A caller must
+# detect that and treat the branch as unknown. Echoes the base OID on success.
+merge_base() {
+  git merge-base "$1" "$2" 2>/dev/null
+}
+
+# Sums net text lines from numstat input (added-minus-deleted). Echoes a string
+# on one line:
+#   "N"            - the net line delta, when every row is a normal text row.
+#   "UNSCORED <why>" - a `- -` (binary) or `0 0` (mode-only) row appeared.
+# Reads each row TAB-aware: numstat emits `add<TAB>del<TAB>path`; a naive
+# "${row##*$'\t'}" grabs the pathname, not the delete count.
+numstat_net() {
+  local total=0 row a d p
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r a d p <<< "$row"
+    if [ "$a" = "-" ] && [ "$d" = "-" ]; then { echo "UNSCORED binary"; return; }; fi
+    if [ "$a" = "0" ] && [ "$d" = "0" ]; then { echo "UNSCORED mode-only"; return; }; fi
+    total=$(( total + a - d ))
+  done
+  echo "$total"
+}
+
+# Echoes one of:
+#   SCORED <0-100>   - the branch's net text lines that are already in base.
+#   UNSCORED <why>   - binary/mode-only row, O==0, or empty patch.
+#   UNKNOWN <why>    - criss-cross history, merge conflict, merge-tree error.
+coverage_score() {
+  local repo="$1" base="$2" branch="$3" mb out O R num
+  mb=$(merge_base "$base" "$branch") || { echo "UNKNOWN no-merge-base"; return; }
+  [ -n "$mb" ] || { echo "UNKNOWN no-merge-base"; return; }
+
+  # O: net text lines on the branch from its merge base.
+  out=$(git diff --no-ext-diff --no-textconv --numstat --no-renames "$mb" "$branch" 2>/dev/null) || { echo "UNKNOWN branch-diff-failed"; return; }
+  O=$(numstat_net <<< "$out")
+  case "$O" in
+    UNSCORED*) { echo "$O-in-branch"; return; } ;;
+  esac
+  [ "$O" -gt 0 ] || { echo "UNSCORED no-text-rows"; return; }
+
+  # Simulated merge + residual diff in ONE subprocess so the synthesized tree
+  # stays reachable. Capture merge-tree's rc separately from its output, then
+  # run the diff only on success — all inside a subshell that keeps the object
+  # dir live. merge-tree rc 1 = conflict, >1 = error -> UNKNOWN.
+  local obj alt base_oid mtrc tree residual
+  obj=$(mktemp -d) || { echo "UNKNOWN no-temp-dir"; return; }
+  alt=$(git -C "$repo" rev-parse --path-format=absolute --git-path objects 2>/dev/null)
+  base_oid=$(git -C "$repo" rev-parse "$base" 2>/dev/null)
+  set +e
+  residual=$(
+    tree=$(GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
+      git -C "$repo" merge-tree --write-tree "$base" "$branch" 2>/dev/null)
+    mtrc=$?
+    echo "RC=$mtrc"
+    [ "$mtrc" -eq 0 ] && [ -n "$tree" ] || exit "$mtrc"
+    GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
+      git -C "$repo" diff --no-ext-diff --no-textconv --numstat --no-renames "$base_oid" "$tree" 2>/dev/null
+  )
+  rc=$?
+  set -e
+  rm -rf "$obj"
+  mtrc=$(printf '%s\n' "$residual" | grep -o '^RC=[0-9]*' | head -1 | cut -d= -f2)
+  residual=$(printf '%s\n' "$residual" | grep -v '^RC=[0-9]*' || true)
+  if [ "${mtrc:-0}" -eq 1 ]; then { echo "UNKNOWN merge-conflict"; return; }; fi
+  if [ "${mtrc:-0}" -gt 1 ] || [ "$rc" -gt 1 ]; then { echo "UNKNOWN merge-tree-error"; return; }; fi
+
+  R=$(numstat_net <<< "$residual")
+  case "$R" in
+    UNSCORED*) { echo "UNSCORED $R"; return; } ;;
+  esac
+
+  num=$(( O - R )); [ "$num" -lt 0 ] && num=0
+  echo "SCORED $(( num * 100 / O ))"
+}
