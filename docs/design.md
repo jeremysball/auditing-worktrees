@@ -196,6 +196,12 @@ changes` *before* tagging, and refuses to delete anything if that commit fails.
 The tag is also verified to resolve to the branch tip before the branch is deleted — prove the
 parachute opened before jumping.
 
+This WIP-commit-and-verify behavior is the **generic** archive path, used by archaeology. The
+content-aware path (see "Content-aware merge detection (hardened v2)") is the strict one: it
+refuses dirty worktrees instead of committing WIP, and it makes the tag atomic via an
+`update-ref --stdin` transaction that verifies the branch OID before creating the tag. The two
+paths are distinguished by caller intent.
+
 ## Cleanup mode
 
 Explicit confirmation required; never runs automatically as part of a report.
@@ -231,6 +237,194 @@ files, 91 days idle.
 - A repo where `merge-base` fails (unrelated histories, detached-HEAD base) is flagged as
   "couldn't determine merge state," not guessed at.
 
+## Content-aware merge detection (hardened v2)
+
+The v1 ancestry check (`git merge-base --is-ancestor`) is authoritative for the common case — a
+cleanly merged branch *is* an ancestor, so its work is provably in base. But it returns a hard
+"no" for any branch whose work shipped under a different commit shape: a squash-merged or
+rebase-merged branch is not a literal ancestor of base even when every line it added is already
+there. `SKILL.md` Step 5 already had to work around this by hand (`git diff <branch>
+<suspected-landing> --stat`). The hardened design moves that judgment into the report itself.
+
+### The coverage calculation
+
+For a branch whose ancestry check says "unmerged," compute how much of the branch's work is
+already in base:
+
+```
+coverage = max(0, O - R) / O × 100
+```
+
+where:
+
+- **O** = the branch's net text-line footprint — `git diff --numstat --no-renames
+  <merge-base> <branch>`, summed as added-minus-deleted over text rows.
+- **R** = the residual text lines still required to get from base to the simulated merge —
+  `git diff --numstat --no-renames <base> <simulated-tree>`, where `<simulated-tree>` is the
+  tree `git merge-tree --write-tree <base> <branch>` reports for a clean merge.
+- `git merge-base <base> <branch>` gives the merge base for O; `git merge-tree --write-tree`
+  computes its own virtual base for the merge.
+
+Intuition, verified empirically (probe scripts in the taskferry worktree's `.review/`): base's
+own forward commits are present on both sides of the second diff, so they cancel; only the
+branch's unmerged work — present in the simulated merge tree, absent from base — shows up as R.
+A fully merged branch yields R ≈ 0 → coverage near 100%. A genuinely unmerged branch yields
+R ≈ O → coverage near 0%. A branch above a configured threshold (default: treat ≥ 95% as
+shipped) is content-merged.
+
+**Compare clamped, never as a raw percentage.** Compute `max(0, original - residual) * 100 >=
+threshold * original` rather than dividing first. The clamp keeps a base that has drifted ahead of
+the branch (R momentarily larger than O) from producing a negative numerator that Bash then
+mishandles; the integer multiply-before-divide avoids float and precedence surprises. This is the
+one place the comparison is specified: as a clamped integer inequality, not a floating-point
+ratio.
+
+**O = 0 is unscored, not 0%.** A branch with no text rows at all — a binary- or mode-only-only
+change, or an empty diff — has O = 0 and must be marked **unscored** (→ needs-triage/unknown)
+before any division runs. The binary/mode-only unscored rules below cover the individual-row case;
+this is the same rule stated for the all-rows-empty case, where `max(0, O - R) / O` would otherwise
+divide by zero.
+
+### When a branch is unscored, not low-coverage
+
+A branch is **unscored** (→ needs-triage/unknown, never auto-cleaned) if *either* its own patch
+or the merge residual contains a numstat row the line-count can't interpret:
+
+- `- -` — a binary change. Line counts are meaningless for it.
+- `0 0` — a mode-only (chmod) change. Zero lines but a real change.
+
+These rows must **force** an unscored flag, not be skipped or treated as zero. A branch whose
+only change is a chmod, or whose merge conflict touches a binary, is exactly the case where a
+line-based coverage number would silently lie. The same rule applies to `merge-tree`'s exit code
+per branch: exit `1` (conflict) → unknown/triage; exit `>1` (error) → unknown/triage. A conflict
+means the simulated merge didn't produce a usable tree, so there is no residual to measure. The
+branch-level `set -e` must never abort the whole repo scan on a single branch's merge-tree
+failure — the failure routes that one branch to unknown and the loop continues.
+
+Criss-cross history (multiple merge bases — where singular `git merge-base` and `merge-tree`'s
+virtual base disagree) is also unscored. O is measured against the singular merge base while R is
+measured against merge-tree's virtual base; when those two bases differ, the two sides of the
+ratio are computed against different ancestors and the number is meaningless.
+
+### Bucket semantics with content awareness
+
+The content-aware score does **not** replace the ancestry check; it is the fallback the report
+reaches for only when ancestry is ambiguous. "Always filter, then process": the cheap
+`merge-base --is-ancestor` runs for every branch; the expensive `merge-tree` computation runs
+only for the branches it says are unmerged. This keeps the hot path (the SessionStart hook's
+budget) on the cheap signal.
+
+- **Literal ancestor** → the v1 rules apply unchanged: merged → safe-to-clean (if clean, idle,
+  unlocked/stale-locked) or needs-triage (if dirty); unmerged → triage/archaeology/hands-off.
+- **Not an ancestor, content-merged** (score ≥ threshold, no unscored flags) → the branch's work
+  is effectively shipped under a different commit hash. It is surfaced like the squash-merge
+  false positive in `SKILL.md` Step 5: offered for the archive-and-delete batch (tag first,
+  nothing is lost either way). It does **not** join the safe-to-clean bucket.
+- **Not an ancestor, low/zero coverage, no unscored flags** → genuinely unmerged → the v1
+  triage/archaeology rules apply.
+- **Unscored** (binary, mode-only, conflict, merge-tree error, criss-cross) → needs-triage/
+  unknown, never auto-cleaned, never auto-archived.
+
+**`clean-safe.sh` stays literal-ancestry only.** It re-verifies with `git merge-base
+--is-ancestor` and refuses anything that is not a provable ancestor. It is deliberately *not*
+broadened to accept content equivalence: deleting a worktree and branch is the irreversible end
+of the pipeline, and there it demands a stronger guarantee than the report's heuristic. The
+content-aware path routes to archive (which preserves work under a tag) precisely because archive
+is reversible and safe-to-clean is not. A content-merged branch is never deleted outright; it is
+archived, so a wrong coverage call costs a mislabeled tag, not lost work.
+
+### Archive: refuse dirty, and make the tag atomic
+
+Two changes to `archive-branch.sh`:
+
+**Strict content-archive mode refuses a dirty worktree** rather than committing WIP. The current
+generic path commits a dirty tree as `wip: archived with uncommitted changes` before tagging
+("A tag saves commits, not uncommitted files" — see the Archive tags section). For the
+content-aware archive path, that WIP commit is wrong: it fabricates history for files that were
+never in a real commit and silently changes the meaning of what's preserved. Strict mode refuses
+dirty worktrees and reports them for separate handling instead. The generic
+`archive-branch.sh` path (used by archaeology, where the context is already gone and the WIP
+commit is the only way to capture the uncommitted files at all) keeps its current behavior; the
+strict path is the one used for content-merged branches, which by definition are clean-merge
+results and should be clean on disk. The two paths are distinguished by caller intent, not
+silently merged.
+
+**Capture the base and branch OIDs and tag atomically.** The tag must be created against the
+exact commit the branch pointed at when it was classified, not whatever the branch happens to
+resolve to moments later. Before tagging/deleting, record `base` and `branch` tips, then create
+the `archive/<branch>` tag inside a single `git update-ref --stdin` transaction that *verifies*
+the branch still points at the recorded OID before committing the tag — `start`, `verify
+<ref> <oid>`, `create refs/tags/archive/<branch> <oid>`, `prepare`, `commit`, aborting the whole
+transaction if the verify fails. This closes the branch-moved-after-check race the v1 design's
+"Known limitations" section flags as theoretical; it is still theoretical for a single operator,
+but the transaction is cheap and removes the class entirely.
+
+### `proc_start_ticks`: separate missing-PID from unreadable `/proc`
+
+`lib.sh`'s `proc_start_ticks` currently maps every read failure to `stale` (via `return 1`), which
+`lock_status` then treats as a provably dead lock. That is wrong for the unreadable-proc case: a
+PID whose `/proc` entry cannot be read (permissions, a vanished-then-reused race, a procfs
+quirk) is not the same as a PID that provably no longer exists. The hardened design returns three
+states:
+
+- **missing** — the process does not exist (a `kill -0` / procfs absence proves it), → stale.
+- **unknown** — `/proc` could not be read for any other reason → the lock stays hands-off, never
+  treated as provably dead.
+- **start-time-match** — the proc record read and its start time equals the lock's → live.
+
+The current `lock_status` collapse of every failure to `stale` must be replaced so that only a
+provably-dead PID yields `stale`; every unreadable-but-not-proven-dead record yields `unknown`.
+An unreadable proc record is never grounds for deletion.
+
+### SessionStart hook: anchored parsers and an explicit timeout
+
+Two fixes to `session-hook.sh`:
+
+**Anchor the awk bucket parsers.** The current substring matches (`/safe-to-clean/`,
+`/needs-triage/`, etc.) conflate any line *containing* a bucket name with a bucket heading. Once
+the report can name a content-merged bucket (e.g. a `likely-content-merged` heading), the bare
+`/content-merged/`-style match would silently swallow it. Anchor each matcher to the heading
+position (start-of-line, leading whitespace, colon) so a heading and a branch description that
+mentions the same word do not collide. This is the same class of bug the v1 design already fixed
+for `git branch -vv` text-grepping — a substring match is a false-positive vector and headings
+must be matched structurally.
+
+**Surface the audit timeout, don't swallow the report.** The hook's `timeout "$TIMEOUT"` currently
+exits silently on any timeout, indistinguishable from "nothing to report." A branch that makes the
+audit exceed its budget looks identical to a clean repo. The hardened design distinguishes them:
+a timeout emits an explicit one-line notice ("audit exceeded its N-second budget; run
+`/auditing-worktrees` manually for the full report") rather than vanishing. Failing to do so
+trains the reader to believe drift is gone when it is merely uncomputed.
+
+**Budget the content analysis out of the hook.** The merge-tree computation is the expensive part
+and must not run inside the hook's 15s window. The hook keeps the cheap ancestry-only report; the
+content-aware pass runs on demand (`/auditing-worktrees`) only. If content awareness must reach
+the hook, it gets its own sub-budget with the same explicit-timeout surface — never folded into
+the silent whole-report swallow.
+
+### Downstream consumers
+
+Four downstream artifacts understand only the four existing buckets and must be updated together
+with any bucket rename or new bucket, or they will mislabel or mishandle content-merged branches:
+
+- `skills/orient-quick/SKILL.md` (the safe-to-clean / needs-triage / hands-off / archaeology
+  mapping and its "what to do" instructions).
+- `skills/finishing-a-development-branch-addendum/SKILL.md` (the cleanup-flow handoff).
+- `skills/auditing-worktrees/SKILL.md` (this skill's own Step 5 already handles squash-merge false
+  positives; it must name the new content-merged bucket and route it to archive, with explicit
+  bucket precedence — content-merged → archive, never clean-safe — and the cleanup instructions
+  for it).
+- `skills/auditing-worktrees/docs/design.md` (this document).
+
+### Threshold config: strict decimal, validated
+
+The coverage threshold (and any new numeric config) is validated strict decimal, base-10
+normalized, before use. An invalid value (a bare octal like `08`, a float where an int is
+required, an empty string) is a **defined** outcome — a hard error or an unknown classification
+— never a silent Bash octal/abort or a value silently reinterpreted in a different base. Bash
+treats a leading-zero string as octal, so an unvalidated `08` threshold would abort or misbehave
+at compare time; validation happens at parse time and names the offending value.
+
 ## Out of scope
 
 - No cron/loop-based sweeps. The original "on-demand only" stance is **superseded** — see
@@ -247,9 +441,14 @@ files, 91 days idle.
   immediately before acting, which narrows but does not close the window between "confirmed
   safe" and "deleted" — another process could theoretically lock or force-move a branch in
   that gap. There's no cross-process mutex. Acceptable for a single operator running cleanup
-  interactively; not safe for unattended or concurrent invocation.
+  interactively; not safe for unattended or concurrent invocation. The strict content-aware
+  archive path closes this for its tag step with an atomic `update-ref --stdin` transaction
+  (see "Content-aware merge detection (hardened v2)"); `clean-safe.sh` and the generic archive
+  path still carry the gap.
 - **`git branch -d` is not transactional against its own re-check:** the merge-base check and
   the branch deletion are two separate git invocations, not one atomic operation. In the
   single-operator case this gap is theoretical; closing it for real would mean building ref
   transactions (`git update-ref --stdin` with old-value verification), which is more mechanism
-  than this tool's actual usage pattern justifies.
+  than the generic path's actual usage pattern justifies. The strict content-aware archive path
+  does use that transaction for its tag step, because there the tag-and-verify is the whole
+  point (prove the parachute opened before jumping) and the cost is trivial.

@@ -115,24 +115,32 @@ a triage list is a question ("is this still worth something?"), and under uncert
 is always "leave it for now" — which is how the pile got there. Archive tags delete the question:
 nothing is lost either way, so there is nothing to weigh.
 
-## Step 5: Resolve needs-triage branches
+## Step 5: Resolve needs-triage and content-merged branches
 
-For each **needs-triage** item, first check whether it's real drift or a false positive: `git
-merge-base --is-ancestor` (what the report used) only catches literal-ancestor merges, so a
-squash-merged or rebase-merged branch reports as "unmerged" even when every line it added already
-shipped under a different commit hash. Before asking the user anything, check content, not
-ancestry:
+The report now distinguishes three merge states, not two (see `docs/design.md`,
+"Content-aware merge detection (hardened v2)"):
 
-```bash
-git diff <branch> <suspected-landing-commit-or-base> --stat
-```
+- **Literal ancestor** — the v1 rules apply. Merged → safe-to-clean / needs-triage (dirty);
+  unmerged → triage/archaeology.
+- **Content-merged** — not a literal ancestor, but the coverage score says the branch's work is
+  effectively shipped under a different commit hash (squash- or rebase-merge). Surfaced under a
+  `likely-content-merged` heading.
+- **Unscored** — a binary/mode-only change, a merge-tree conflict or error, or criss-cross
+  history made the line-count coverage meaningless. Sent to needs-triage/unknown, never
+  auto-cleaned or auto-archived.
 
-If that diff is empty, or the only remaining lines are base having *more* than the branch (base
-drifted forward after the squash-merge, not the branch holding something base lacks), the branch
-is fully shipped — treat it as a squash-merge false positive, not open work. Group every
-false-positive branch into one archive-and-delete confirmation (same as Step 4's archaeology
-batch — nothing is lost either way, so there's nothing to weigh) rather than running it through
-the menu below.
+For each **content-merged** item, the work is already in base — it is a squash-merge false
+positive, not open work. Group every content-merged branch into one archive-and-delete
+confirmation (same as Step 4's archaeology batch — nothing is lost either way, so there's nothing
+to weigh) rather than running it through the menu below. Content-merged branches go to **archive**,
+never to `clean-safe.sh`, because the coverage score is a heuristic and archive preserves the
+work under a tag if the score is ever wrong.
+
+For each **needs-triage** item, it is genuinely open (or unscored, which means the report could
+not prove either way — treat that as open and look at the branch before deciding anything). As a
+manual backstop for a branch the report missed, `git diff <branch> <suspected-landing-or-base>
+--stat` still tells you whether its lines shipped under a different hash — an empty diff means the
+work is already in base and that branch belongs with the content-merged archive batch above.
 
 For every branch that's genuinely still open, resolve it with the same options
 `finishing-a-development-branch` uses for one branch — inlined here so a triage sweep doesn't
