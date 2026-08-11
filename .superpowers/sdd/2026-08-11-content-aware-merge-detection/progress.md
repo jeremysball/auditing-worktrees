@@ -174,3 +174,25 @@ orient-quick/SKILL.md, finishing-a-development-branch-addendum/SKILL.md): NOT ST
 in its own private submodule repo per the plan's explicit "separate PRs, each its own submodule
 repo" — handled as follow-up work in those repos' own worktrees/branches/PRs, not inside this
 plan's SDD loop.
+
+Final whole-branch review (commits 334769f..a03546e): complete — reviewer oc_msoxmihj_96790d90
+(openai/gpt-5.6-luna, most-capable tier), verdict Needs fixes (1 Important, 1 Minor, no Critical).
+  - Important, CONFIRMED against source before dispatching a fix: `coverage_score` in `bin/lib.sh`
+    ignored `$repo` for the `merge_base` call and the branch-diff `git diff --numstat` call
+    (bare `git`, no `-C`), relying on caller cwd — a latent contract violation. Every current
+    caller (`audit_repo()`, `bin/coverage-score`) happened to `cd "$repo"` first, which is exactly
+    why no test caught it — but the next caller (the cross-repo consumers Task 8 sets up) would
+    not necessarily do that.
+  - Minor: `bin/summary-parser.sh`'s bucket-heading regexes didn't require the trailing colon its
+    own header comment claimed.
+  - Fix wave (oc_msoxrsdu_ab8243a6, one fixer for both findings) -> `2089e59`
+    `fix(audit): make coverage_score consistently repo-scoped` (merge_base now takes repo, every
+    git call uses -C; new tests/test-coverage.sh scenario 8 calls from a foreign cwd) + `656155f`
+    `fix(audit): tighten bucket-heading anchor to require the colon`.
+  - Scoped re-review (oc_msoxvn0z_71d454a6): both findings ADDRESSED, no new breakage. Full suite
+    9/9 files, 83 assertions, all passing.
+  - No residual findings. Nothing parked, nothing BLOCKED.
+
+All 8 tasks complete (Task 8 cross-repo consumers are follow-up work in their own repos, per the
+plan's own "separate PRs, each its own submodule repo"). Final review clean. Ready for
+finishing-a-development-branch.
