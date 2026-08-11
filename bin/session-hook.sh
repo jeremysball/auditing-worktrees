@@ -24,6 +24,8 @@ set -uo pipefail
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AUDIT="$BIN/audit-worktrees.sh"
 [ -x "$AUDIT" ] || exit 0
+# shellcheck source=summary-parser.sh
+source "$BIN/summary-parser.sh"
 command -v git >/dev/null 2>&1 || exit 0
 command -v jq  >/dev/null 2>&1 || exit 0
 
@@ -41,7 +43,14 @@ else
   mode=sweep
 fi
 
-out=$(timeout "$TIMEOUT" "$AUDIT" "$root" 2>/dev/null) || exit 0
+out=$(timeout "$TIMEOUT" "$AUDIT" --no-content "$root" 2>/dev/null)
+rc=$?
+if [ "$rc" -eq 124 ]; then
+  jq -n --arg ctx "Worktree audit exceeded its ${TIMEOUT}s budget in $(basename "$root") and was skipped. Run the auditing-worktrees skill manually for the full report." \
+    '{hookSpecificOutput:{hookEventName:"SessionStart", additionalContext:$ctx}}'
+  exit 0
+fi
+[ "$rc" -ne 0 ] && exit 0
 [ -n "$out" ] || exit 0
 
 if [ "$mode" = repo ]; then
@@ -51,24 +60,7 @@ $out
 Nothing here has been changed. To act on it, use the auditing-worktrees skill."
 else
   # Collapse to one line per repo. Anything longer trains the reader to skip it.
-  summary=$(printf '%s\n' "$out" | awk '
-    /^=== / { if (repo != "") emit(); repo=$2; s=t=a=h=0; next }
-    /safe-to-clean/ { m="s"; next }
-    /needs-triage/  { m="t"; next }
-    /archaeology/   { m="a"; next }
-    /hands-off/     { m="h"; next }
-    /^\(/           { m="" }
-    /^    / { if (m=="s") s++; else if (m=="t") t++; else if (m=="a") a++; else if (m=="h") h++ }
-    function emit(   parts) {
-      parts=""
-      if (t) parts = parts sprintf("%d triage, ", t)
-      if (a) parts = parts sprintf("%d archaeology, ", a)
-      if (s) parts = parts sprintf("%d safe-to-clean, ", s)
-      if (h) parts = parts sprintf("%d hands-off, ", h)
-      if (parts != "") { sub(/, $/, "", parts); printf "  %s: %s\n", repo, parts }
-    }
-    END { if (repo != "") emit() }
-  ')
+  summary=$(summary_parse "$out")
   [ -n "$summary" ] || exit 0
   body="Worktree drift across $root (from the auditing-worktrees SessionStart hook, report only):
 
