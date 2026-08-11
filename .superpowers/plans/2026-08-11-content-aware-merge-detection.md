@@ -259,10 +259,16 @@ Append to `bin/lib.sh`:
 
 ```bash
 # Echoes the singular merge-base of two refs, or nothing on error. In a
-# criss-cross history there are MULTIPLE merge bases; `git merge-base` without
-# --all errors ("multiple merge bases") rather than pick one. A caller must
-# detect that and treat the branch as unknown. Echoes the base OID on success.
+# criss-cross history there are MULTIPLE merge bases; singular `git merge-base`
+# does not error — it picks one arbitrarily, which would score against a
+# possibly-wrong base. Count with --all first and treat >1 base as unknown.
+# Echoes the base OID on success.
 merge_base() {
+  local n
+  n=$(git merge-base --all "$1" "$2" 2>/dev/null | wc -l)
+  # >1 base = criss-cross history; singular merge-base would pick one
+  # arbitrarily and score against a possibly-wrong base. Treat as unknown.
+  [ "$n" -eq 1 ] || return 1
   git merge-base "$1" "$2" 2>/dev/null
 }
 
@@ -349,7 +355,7 @@ coverage_score() {
 
 Note: `merge-tree --write-tree` prints the resulting tree OID on stdout; the pipeline reads it and immediately diffs against it while `GIT_OBJECT_DIRECTORY="$obj"` is still in effect, then the temp dir is removed. This keeps the repo's unreachable-object set unchanged (the synthesized tree lives only in `$obj`) while still letting the residual diff resolve it.
 
-Criss-cross: `merge_base` uses singular `git merge-base`, which errors ("multiple merge bases") on a criss-cross history, so `coverage_score` returns `UNKNOWN no-merge-base` — the branch is never scored against merge-tree's virtual base. If singular `git merge-base` ever returns an OID while merge-tree uses a different virtual base, the residual would be off — treat that case conservatively as UNKNOWN (the singular-merge-base error path already covers the common criss-cross).
+Criss-cross: `merge_base` counts bases with `git merge-base --all` and returns 1 when there is more than one, so `coverage_score` returns `UNKNOWN no-merge-base` — the branch is never scored against merge-tree's virtual base. An earlier draft of this plan claimed singular `git merge-base` *errors* ("multiple merge bases") on a criss-cross and relied on that error path. It does not: on git 2.55 it exits 0 and picks a base arbitrarily. Verified in a throwaway two-base repo, and by reverting the `--all` guard and re-running scenario 7 of `tests/test-coverage.sh` — without the guard a genuinely unmerged criss-cross branch comes back `SCORED 100`, i.e. classified as fully landed and offered for deletion. The explicit count is the guard; there is no error path to fall back on.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
