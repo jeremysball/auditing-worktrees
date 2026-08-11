@@ -130,11 +130,13 @@ for branch in "$@"; do
     fi
   fi
 
-  # Close the post-tag race: the atomic transaction pinned the branch at `tip`
+  # Narrow the post-tag race: the atomic transaction pinned the branch at `tip`
   # and created the tag there, but a concurrent commit after that but before
   # `git branch -D` would make `-D` delete the NEW tip while the tag keeps the
-  # old one, stranding the new tip unreachable. Re-verify immediately before
-  # the destructive steps (worktree remove + branch -D) that follow.
+  # old one, stranding the new tip unreachable. This re-check shrinks the
+  # window to the steps between here and `git branch -D` (the `git worktree
+  # remove` below) — it cannot close it entirely: a commit landing in that
+  # narrow window still slips past and its tip is left unreachable.
   if [ "$(git rev-parse "refs/heads/$branch" 2>/dev/null)" != "$tip" ]; then
     echo "refusing $branch: branch advanced after tagging (now $(git rev-parse --short refs/heads/$branch), expected $tip) — worktree/branch left in place" >&2
     rc=1; continue
