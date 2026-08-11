@@ -18,7 +18,15 @@ NO_CONTENT=false
 if [ "${1:-}" = "--no-content" ]; then NO_CONTENT=true; shift; fi
 ROOT="${1:-$(pwd)}"
 
-CONTENT_MERGE_THRESHOLD=95   # Task 7 makes this env-configurable + validated
+if [ -z "${WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD+x}" ]; then
+  CONTENT_MERGE_THRESHOLD=95                     # unset -> default
+else
+  CONTENT_MERGE_THRESHOLD=$(validate_pct "$WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD")
+  if [ "$CONTENT_MERGE_THRESHOLD" = "invalid" ]; then
+    echo "  (skipped: WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD must be an integer 0-100 with no leading zero, got '$WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD')" >&2
+    CONTENT_MERGE_THRESHOLD=95
+  fi
+fi
 
 audit_repo() {
   local repo="$1"

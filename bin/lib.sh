@@ -218,3 +218,19 @@ coverage_score() {
   num=$(( O - R )); [ "$num" -lt 0 ] && num=0
   echo "SCORED $(( num * 100 / O ))"
 }
+
+# Echoes the base-10 integer value, or "invalid". Strict decimal: rejects
+# leading zeros ("08" is invalid, not 8 — a bare Bash arithmetic read would
+# treat it as octal and silently change its meaning). Never emits a non-numeric
+# string that a caller could feed to $(( )).
+validate_pct() {
+  local val="$1"
+  case "$val" in
+    ''|*[!0-9]*) echo invalid; return ;;
+    # a leading zero with more than one digit is octal-looking -> invalid
+    '0'*) [ "$val" = "0" ] || { echo invalid; return; } ;;
+  esac
+  local n
+  n=$((val))            # safe: matched ^[0-9]+$ with no leading zero
+  if [ "$n" -ge 0 ] && [ "$n" -le 100 ]; then echo "$n"; else echo invalid; fi
+}
