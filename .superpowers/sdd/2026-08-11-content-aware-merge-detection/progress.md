@@ -84,6 +84,26 @@ Task 5: complete (commits 4d1a48b..4133e65, review clean — Approved, first pas
     clean-safe.sh crashed pre-refusal rc=1 (inherent to the brief's spec, not a real gap).
   - Test verified independently: `bash tests/test-clean-content-refuses.sh` -> 2/2 pass.
 
+Task 6: complete (commits 99a8f6f..487d206, review clean — Approved, first pass)
+  - Implementer oc_msow5xwl_afcf50c4 -> 487d206 `fix(hook): anchor bucket parsers and surface the
+    audit timeout`. Extracted the inline awk into `bin/summary-parser.sh` (`summary_parse`, sourced
+    by `session-hook.sh`, structural `/^  <name>/` anchors so a branch description mentioning a
+    bucket name can never conflate with the heading); wired `--no-content` into the hook's
+    `audit-worktrees.sh` call so the merge-tree pass never runs in the 15s window; distinguished
+    timeout (rc 124, explicit jq notice) from every other non-zero exit (still silent per the
+    fail-silent contract). Caught and fixed a brief gap itself: the brief's Step 6 `git add` only
+    listed 2 files, omitting the new `bin/summary-parser.sh` (would have broken the hook at session
+    start if committed as literally specified).
+  - Reviewer (oc_msow8y9z_e6c2866f): Approved, no Critical/Important. Verified line-by-line: all 4
+    binding constraints hold, and the test genuinely fails against the old bare-substring matcher
+    (traced by hand) and passes against the anchored one. Minor (deferred, plan-mandated
+    non-defects): heading matchers omit the literal trailing colon the plan's constraint prose
+    describes (functionally moot — 2-space vs 4-space indent already disambiguates); report's stale
+    commit hash (same pattern as prior tasks); test uses `grep` not `rg` (brief-verbatim).
+  - Test verified independently: `bash tests/test-hook-parse.sh` -> 3/3 pass. Regression:
+    test-archive.sh 14/14, test-audit-content.sh 9/9, test-archive-strict.sh 10/10,
+    test-clean-content-refuses.sh 2/2, test-coverage.sh 10/10, test-lock.sh 5/5.
+
 Task 8: SCOPE EXPANDED 2026-08-11 (user decision) — not yet started, sequenced after Tasks 3-7.
   - Original Task 8 named only two PROSE consumers (orient-quick, finishing-a-development-branch-addendum).
     An ecosystem sweep found two CODE consumers with their own merge-detection implementations that the
