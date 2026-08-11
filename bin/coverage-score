@@ -45,12 +45,14 @@ if [ "${1:-}" = "--help" ]; then
   exit 0
 fi
 
-case "${1:-}" in
-  -*)
-    echo "error: unknown flag $1"
-    exit 2
-    ;;
-esac
+for arg in "$@"; do
+  case "$arg" in
+    -*)
+      echo "error: unknown flag $arg"
+      exit 2
+      ;;
+  esac
+done
 [ "$#" -eq 3 ] || {
   echo "error: usage: coverage-score <repo> <base> <branch>"
   exit 2
@@ -58,10 +60,11 @@ esac
 
 # lib.sh's merge-base read runs in the current working directory, so resolve
 # <repo> to an absolute path and enter it before scoring. A relative path is
-# resolved against the caller's cwd, before any cd.
-REPO=$(cd -- "$1" && pwd) || {
+# resolved against the caller's cwd, before any cd. The cd's own error must
+# not leak to stderr — this is a usage error reported on stdout.
+REPO=$(cd -- "$1" 2>/dev/null && pwd) || {
   echo "error: not a directory: $1"
-  exit 1
+  exit 2
 }
 cd "$REPO"
 

@@ -43,8 +43,14 @@ out=$("$CLI" --help); rc=$?
 
 echo "=== 4. unknown flag -> error: unknown flag + exit 2 ==="
 out=$("$CLI" --bogus "$PWD" main feat); rc=$?
-[[ $rc -eq 2 ]] && ok "exit 2" || bad "exit was $rc"
-[[ "$out" == "error: unknown flag --bogus" ]] && ok "message: $out" || bad "message was '$out'"
+[[ $rc -eq 2 ]] && ok "exit 2 (position 1)" || bad "exit was $rc"
+[[ "$out" == "error: unknown flag --bogus" ]] && ok "message (position 1): $out" || bad "message was '$out'"
+out=$("$CLI" "$PWD" --bogus feat); rc=$?
+[[ $rc -eq 2 ]] && ok "exit 2 (position 2)" || bad "exit was $rc"
+[[ "$out" == "error: unknown flag --bogus" ]] && ok "message (position 2): $out" || bad "message was '$out'"
+out=$("$CLI" "$PWD" main --bogus); rc=$?
+[[ $rc -eq 2 ]] && ok "exit 2 (position 3)" || bad "exit was $rc"
+[[ "$out" == "error: unknown flag --bogus" ]] && ok "message (position 3): $out" || bad "message was '$out'"
 
 echo "=== 5. UNSCORED verdict is a successful run (exit 0) ==="
 git checkout -qb bin main
@@ -53,6 +59,22 @@ git checkout -q main
 out=$("$CLI" "$PWD" main bin); rc=$?
 [[ $rc -eq 0 ]] && ok "exit 0 on UNSCORED" || bad "exit was $rc"
 [[ "$out" == "UNSCORED"* ]] && ok "verdict: $out" || bad "verdict was '$out'"
+
+echo "=== 6. UNKNOWN verdict is a successful run (exit 0) ==="
+# unrelated-history repo: merge-base errors -> UNKNOWN no-merge-base
+T2="$SCRATCH/other"; mkdir -p "$T2"; cd "$T2"
+git init -q -b main .
+git config user.email t@t.t; git config user.name t
+echo other > f; git add -A; git commit -qm other
+out=$("$CLI" "$T2" main feat); rc=$?
+[[ $rc -eq 0 ]] && ok "exit 0 on UNKNOWN" || bad "exit was $rc"
+[[ "$out" == "UNKNOWN"* ]] && ok "verdict: $out" || bad "verdict was '$out'"
+
+echo "=== 7. bad repo path -> error: + exit 2, no raw cd error ==="
+out=$("$CLI" "$SCRATCH/nonexistent" main feat 2>/tmp/cli-stderr); rc=$?
+[[ $rc -eq 2 ]] && ok "exit 2" || bad "exit was $rc"
+[[ "$out" == "error: not a directory:"* ]] && ok "message: $out" || bad "message was '$out'"
+[ ! -s /tmp/cli-stderr ] && ok "stderr clean" || bad "stderr leaked: $(cat /tmp/cli-stderr)"
 
 echo
 echo "=== $pass passed, $fail failed ==="
