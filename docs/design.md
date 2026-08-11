@@ -279,6 +279,12 @@ mishandles; the integer multiply-before-divide avoids float and precedence surpr
 one place the comparison is specified: as a clamped integer inequality, not a floating-point
 ratio.
 
+**O = 0 is unscored, not 0%.** A branch with no text rows at all — a binary- or mode-only-only
+change, or an empty diff — has O = 0 and must be marked **unscored** (→ needs-triage/unknown)
+before any division runs. The binary/mode-only unscored rules below cover the individual-row case;
+this is the same rule stated for the all-rows-empty case, where `max(0, O - R) / O` would otherwise
+divide by zero.
+
 ### When a branch is unscored, not low-coverage
 
 A branch is **unscored** (→ needs-triage/unknown, never auto-cleaned) if *either* its own patch
