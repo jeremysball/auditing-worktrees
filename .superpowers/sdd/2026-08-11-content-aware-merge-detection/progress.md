@@ -73,6 +73,17 @@ Task 4: complete (commits f08454d..a26369b, review clean — Approved, fix round
   - Regression: test-archive.sh 14/14, test-audit-content.sh 9/9, test-coverage.sh 10/10,
     test-lock.sh 5/5 all still pass.
 
+Task 5: complete (commits 4d1a48b..4133e65, review clean — Approved, first pass)
+  - Implementer oc_msow3631_bfe3071f -> d36ad0b (report's own claimed hash, stale/wrong per
+    reviewer — actually landed as 4133e65 after the standard recovery: `taskferry accept`
+    partially applied, production/test file manually extracted and applied from the diff,
+    test verified independently, committed by hand). `test(clean): pin that clean-safe stays
+    literal-ancestry-only` — guard test only, `bin/clean-safe.sh` genuinely untouched.
+  - Reviewer (oc_msow4irv_691932f0): Approved, no Critical/Important. Minor (deferred): report's
+    stale commit hash (same pattern as Tasks 3-4's reports); test would pass vacuously if
+    clean-safe.sh crashed pre-refusal rc=1 (inherent to the brief's spec, not a real gap).
+  - Test verified independently: `bash tests/test-clean-content-refuses.sh` -> 2/2 pass.
+
 Task 8: SCOPE EXPANDED 2026-08-11 (user decision) — not yet started, sequenced after Tasks 3-7.
   - Original Task 8 named only two PROSE consumers (orient-quick, finishing-a-development-branch-addendum).
     An ecosystem sweep found two CODE consumers with their own merge-detection implementations that the
