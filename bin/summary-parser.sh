@@ -9,11 +9,11 @@
 summary_parse() {
   printf '%s\n' "$1" | awk '
     /^=== / { if (repo != "") emit(); repo=$2; s=t=a=h=cm=0; next }
-    /^  safe-to-clean/           { m="s"; next }
-    /^  needs-triage/            { m="t"; next }
-    /^  archaeology/             { m="a"; next }
-    /^  hands-off/               { m="h"; next }
-    /^  likely-content-merged/   { m="cm"; next }
+    /^  safe-to-clean[^:]*:/           { m="s"; next }
+    /^  needs-triage[^:]*:/            { m="t"; next }
+    /^  archaeology[^:]*:/             { m="a"; next }
+    /^  hands-off[^:]*:/               { m="h"; next }
+    /^  likely-content-merged[^:]*:/   { m="cm"; next }
     /^  \(/                      { m="" }
     /^    / { if (m=="s") s++; else if (m=="t") t++; else if (m=="a") a++; else if (m=="h") h++; else if (m=="cm") cm++ }
     function emit(   parts) {
