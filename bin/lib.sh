@@ -31,6 +31,11 @@ detect_base() {
 #   unknown - /proc/<pid>/stat could not be read for any other reason.
 proc_start_ticks() {
   local pid="$1" stat rest
+  # A missing /proc/<pid> only proves the process is gone when procfs itself
+  # is mounted. In a container or chroot without /proc, EVERY pid looks absent,
+  # which would turn every live lock into "stale" - i.e. into a deletion. Probe
+  # procfs first and report "unknown" when it isn't there.
+  if [ ! -d "/proc/self" ]; then echo "unknown"; return; fi
   if [ ! -d "/proc/$pid" ]; then echo "missing"; return; fi
   stat=$(cat "/proc/$pid/stat" 2>/dev/null) || { echo "unknown"; return; }
   rest="${stat##*) }"
@@ -180,8 +185,12 @@ coverage_score() {
   # O: net text lines on the branch from its merge base.
   out=$(git -C "$repo" diff --no-ext-diff --no-textconv --numstat --no-renames "$mb" "$branch" 2>/dev/null) || { echo "UNKNOWN branch-diff-failed"; return; }
   O=$(numstat_net <<< "$out")
+  # numstat_net already returns the documented "UNSCORED <why>" shape - echo it
+  # verbatim. Decorating it here (a suffix on one path, a second "UNSCORED "
+  # prefix on the other) produced three different strings for one verdict and
+  # broke the contract the coverage-score CLI publishes to its consumers.
   case "$O" in
-    UNSCORED*) { echo "$O-in-branch"; return; } ;;
+    UNSCORED*) { echo "$O"; return; } ;;
   esac
   [ "$O" -gt 0 ] || { echo "UNSCORED no-text-rows"; return; }
 
@@ -189,22 +198,32 @@ coverage_score() {
   # stays reachable. Capture merge-tree's rc separately from its output, then
   # run the diff only on success — all inside a subshell that keeps the object
   # dir live. merge-tree rc 1 = conflict, >1 = error -> UNKNOWN.
-  local obj alt base_oid mtrc tree residual
+  local obj alt base_oid mtrc tree residual had_errexit=0
   obj=$(mktemp -d) || { echo "UNKNOWN no-temp-dir"; return; }
   alt=$(git -C "$repo" rev-parse --path-format=absolute --git-path objects 2>/dev/null)
+  [ -n "$alt" ] || { rm -rf "$obj"; echo "UNKNOWN no-object-dir"; return; }
   base_oid=$(git -C "$repo" rev-parse "$base" 2>/dev/null)
+  # Restore the caller's errexit rather than forcing it on: lib.sh is sourced
+  # by consumers that deliberately run without `set -e`, and leaving errexit
+  # armed behind us turns their next tolerated failure into an abort.
+  case "$-" in *e*) had_errexit=1 ;; esac
   set +e
   residual=$(
     tree=$(GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
       git -C "$repo" merge-tree --write-tree "$base" "$branch" 2>/dev/null)
     mtrc=$?
     echo "RC=$mtrc"
-    [ "$mtrc" -eq 0 ] && [ -n "$tree" ] || exit "$mtrc"
+    # An empty tree with rc 0 must NOT fall through: exiting 0 here would leave
+    # an empty residual, which parses as R=0 and fails open to SCORED 100.
+    if [ "$mtrc" -ne 0 ] || [ -z "$tree" ]; then
+      [ "$mtrc" -ne 0 ] && exit "$mtrc"
+      exit 2
+    fi
     GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
       git -C "$repo" diff --no-ext-diff --no-textconv --numstat --no-renames "$base_oid" "$tree" 2>/dev/null
   )
   rc=$?
-  set -e
+  [ "$had_errexit" -eq 1 ] && set -e
   rm -rf "$obj"
   mtrc=$(printf '%s\n' "$residual" | grep -o '^RC=[0-9]*' | head -1 | cut -d= -f2)
   residual=$(printf '%s\n' "$residual" | grep -v '^RC=[0-9]*' || true)
@@ -213,11 +232,19 @@ coverage_score() {
 
   R=$(numstat_net <<< "$residual")
   case "$R" in
-    UNSCORED*) { echo "UNSCORED $R"; return; } ;;
+    UNSCORED*) { echo "$R"; return; } ;;
   esac
 
-  num=$(( O - R )); [ "$num" -lt 0 ] && num=0
-  echo "SCORED $(( num * 100 / O ))"
+  # R is a NET line count, so it goes negative when the branch's own deletions
+  # are missing from base (base ends up with more lines than the merged tree).
+  # Subtracting a negative R inflated the score past O - a branch whose deletion
+  # never shipped scored SCORED 111 and cleared the 95% bar. Residual work is
+  # residual work whichever direction it points, so score against its magnitude
+  # and clamp to the documented 0-100 range.
+  local absR="${R#-}"
+  num=$(( O - absR )); [ "$num" -lt 0 ] && num=0
+  local pct=$(( num * 100 / O )); [ "$pct" -gt 100 ] && pct=100
+  echo "SCORED $pct"
 }
 
 # Echoes the base-10 integer value, or "invalid". Strict decimal: rejects
@@ -231,6 +258,11 @@ validate_pct() {
     # a leading zero with more than one digit is octal-looking -> invalid
     '0'*) [ "$val" = "0" ] || { echo invalid; return; } ;;
   esac
+  # Reject anything too long to be a percentage BEFORE the arithmetic read:
+  # $(( )) wraps modulo 2^64, so 18446744073709551616 would evaluate to 0 and
+  # validate as a legal threshold - turning a nonsense value into "archive
+  # everything" rather than into the intended rejection.
+  [ "${#val}" -le 3 ] || { echo invalid; return; }
   local n
   n=$((val))            # safe: matched ^[0-9]+$ with no leading zero
   if [ "$n" -ge 0 ] && [ "$n" -le 100 ]; then echo "$n"; else echo invalid; fi

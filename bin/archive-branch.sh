@@ -130,13 +130,8 @@ for branch in "$@"; do
     fi
   fi
 
-  # Narrow the post-tag race: the atomic transaction pinned the branch at `tip`
-  # and created the tag there, but a concurrent commit after that but before
-  # `git branch -D` would make `-D` delete the NEW tip while the tag keeps the
-  # old one, stranding the new tip unreachable. This re-check shrinks the
-  # window to the steps between here and `git branch -D` (the `git worktree
-  # remove` below) — it cannot close it entirely: a commit landing in that
-  # narrow window still slips past and its tip is left unreachable.
+  # Fail early and loudly if the branch already moved, so we don't tear down a
+  # worktree we're then going to refuse to finish deleting.
   if [ "$(git rev-parse "refs/heads/$branch" 2>/dev/null)" != "$tip" ]; then
     echo "refusing $branch: branch advanced after tagging (now $(git rev-parse --short refs/heads/$branch), expected $tip) — worktree/branch left in place" >&2
     rc=1; continue
@@ -146,7 +141,19 @@ for branch in "$@"; do
     [ -f "${gitdir:-}/locked" ] && git worktree unlock "$path"
     git worktree remove "$path"
   fi
-  git branch -D "$branch" >/dev/null
+
+  # Delete the ref CONDITIONALLY on it still pointing at `tip`. `git branch -D`
+  # is an unconditional force-delete, so a commit landing between the re-check
+  # above and the delete would take the new tip with it while the tag kept the
+  # old one, stranding the new commit unreachable for gc to prune. `update-ref
+  # --stdin` takes an expected old-value on `delete` and refuses the whole
+  # transaction when the tip has moved, which closes that window instead of
+  # merely narrowing it.
+  if ! printf 'start\ndelete refs/heads/%s %s\nprepare\ncommit\n' "$branch" "$tip" \
+      | git update-ref --stdin 2>/dev/null; then
+    echo "refusing $branch: branch advanced during archive (conditional delete aborted) — tag $tag kept, branch left in place" >&2
+    rc=1; continue
+  fi
 
   echo "  archived $branch -> $tag ($(git rev-parse --short "$tip"))"
 done
