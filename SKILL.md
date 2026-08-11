@@ -130,11 +130,13 @@ The report now distinguishes three merge states, not two (see `docs/design.md`,
   auto-cleaned or auto-archived.
 
 For each **content-merged** item, the work is already in base — it is a squash-merge false
-positive, not open work. Group every content-merged branch into one archive-and-delete
-confirmation (same as Step 4's archaeology batch — nothing is lost either way, so there's nothing
-to weigh) rather than running it through the menu below. Content-merged branches go to **archive**,
-never to `clean-safe.sh`, because the coverage score is a heuristic and archive preserves the
-work under a tag if the score is ever wrong.
+positive, not open work. Group every content-merged branch into one archive-and-delete confirmation using
+`archive-branch.sh --strict <repo> <branch>...` (NOT the generic archive path):
+strict mode refuses a dirty worktree instead of committing WIP, and tags atomically.
+If strict refuses a branch (dirty worktree), resolve that branch by hand — do not
+fall back to the generic WIP-committing archive path for it. Content-merged branches go to
+**archive**, never to `clean-safe.sh`, because the coverage score is a heuristic and archive
+preserves the work under a tag if the score is ever wrong.
 
 For each **needs-triage** item, it is genuinely open (or unscored, which means the report could
 not prove either way — treat that as open and look at the branch before deciding anything). As a
@@ -198,6 +200,7 @@ All thresholds are env-overridable; never hardcode them at a call site.
 | `WORKTREE_AUDIT_INFLIGHT_SECS` | `7200` (2h) | Activity newer than this = in flight, hidden, untouchable |
 | `WORKTREE_AUDIT_ARCHAEOLOGY_SECS` | `7776000` (90d) | Idle longer than this + never pushed = archaeology |
 | `WORKTREE_AUDIT_ARCHIVE_PREFIX` | `archive` | Tag namespace for archived branches |
+| `WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD` | `95` | Coverage % above which a non-ancestor branch is treated as content-merged (batch archive) |
 
 ## Known limitations
 
