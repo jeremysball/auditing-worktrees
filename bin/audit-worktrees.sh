@@ -14,7 +14,11 @@ set -euo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+NO_CONTENT=false
+if [ "${1:-}" = "--no-content" ]; then NO_CONTENT=true; shift; fi
 ROOT="${1:-$(pwd)}"
+
+CONTENT_MERGE_THRESHOLD=95   # Task 7 makes this env-configurable + validated
 
 audit_repo() {
   local repo="$1"
@@ -53,7 +57,7 @@ audit_repo() {
     --format=$'%(refname:short)\t%(upstream:short)\t%(upstream:track)')
 
   local any=0 inflight_count=0
-  local -a safe=() triage=() archaeology=() handsoff=() unknown_merge=()
+  local -a safe=() triage=() archaeology=() handsoff=() unknown_merge=() content_merged=()
 
   while IFS= read -r branch; do
     [ "$branch" = "$base" ] && continue
@@ -81,6 +85,25 @@ audit_repo() {
     fi
     local merged=true
     [ "$merge_rc" -eq 1 ] && merged=false
+
+    local is_content_merged=false unscored=false reason="unmerged"
+    if [ "$NO_CONTENT" = false ] && [ "$merged" = false ]; then
+      local score
+      score=$(coverage_score "$repo" "$base" "$branch")
+      case "$score" in
+        SCORED*)
+          local pct="${score#SCORED }"
+          if [ "$pct" -ge "$CONTENT_MERGE_THRESHOLD" ]; then is_content_merged=true; fi
+          ;;
+        UNSCORED*|UNKNOWN*)
+          # Unscored / unknown -> cannot prove it shipped. It must go to
+          # needs-triage, NEVER archaeology (never batch-archived) and never
+          # clean-safe. Record the flag so the split below forces triage.
+          unscored=true
+          reason="$reason, ${score%% *}"
+          ;;
+      esac
+    fi
 
     local status="none"
     if [ -n "$path" ]; then
@@ -110,12 +133,16 @@ audit_repo() {
         safe+=("$desc")
       fi
     else
-      local reason="unmerged"
       [ "$status" = "stale" ] && reason="unmerged, stale lock (dead session)"
       [ -n "${gone[$branch]:-}" ] && reason="$reason, upstream deleted"
       [ "$dirty" -gt 0 ] && reason="$reason, $dirty uncommitted file(s)"
 
-      if [ "$age" -ge "$ARCHAEOLOGY_SECS" ] && [ -z "${has_upstream[$branch]:-}" ]; then
+      if [ "$is_content_merged" = true ]; then
+        content_merged+=("$desc — content-merged (work already in base, different hash)")
+      elif [ "$unscored" = true ]; then
+        # Unscored or unknown coverage: needs-triage, never archaeology.
+        triage+=("$desc — $reason")
+      elif [ "$age" -ge "$ARCHAEOLOGY_SECS" ] && [ -z "${has_upstream[$branch]:-}" ]; then
         archaeology+=("$desc — $reason, never pushed")
       else
         triage+=("$desc — $reason")
@@ -139,7 +166,8 @@ audit_repo() {
   # Nothing actionable and nothing dangling: stay quiet rather than printing a
   # header for a repo whose only branches are in flight.
   if [ ${#safe[@]} -eq 0 ] && [ ${#triage[@]} -eq 0 ] && [ ${#archaeology[@]} -eq 0 ] \
-     && [ ${#handsoff[@]} -eq 0 ] && [ ${#unknown_merge[@]} -eq 0 ] && [ ${#prunable[@]} -eq 0 ]; then
+     && [ ${#handsoff[@]} -eq 0 ] && [ ${#unknown_merge[@]} -eq 0 ] && [ ${#prunable[@]} -eq 0 ] \
+     && [ ${#content_merged[@]} -eq 0 ]; then
     return
   fi
 
@@ -155,6 +183,10 @@ audit_repo() {
   if [ ${#archaeology[@]} -gt 0 ]; then
     echo "  archaeology (older than $(human_age "$ARCHAEOLOGY_SECS"), never pushed — batch archive):"
     printf '    %s\n' "${archaeology[@]}"
+  fi
+  if [ ${#content_merged[@]} -gt 0 ]; then
+    echo "  likely-content-merged (work already in base under a different hash — batch archive):"
+    printf '    %s\n' "${content_merged[@]}"
   fi
   if [ ${#handsoff[@]} -gt 0 ]; then
     echo "  hands-off (live or unrecognized lock — never touch):"
