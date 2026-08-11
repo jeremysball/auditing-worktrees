@@ -26,6 +26,27 @@ Task 2: complete (commits 5f0e5ca..d2ea9da, tests/test-coverage.sh 10/10)
     was self-contradictory); `|| true` added to the residual `grep -v` (it exits 1 on a clean merge,
     which under `set -e` aborted the common case).
 
+Task 3: complete (commits 3b5c5ae..2a50e7c, review clean — Approved, fix round 1/1)
+  - Implementer oc_msouzyup_bc5e8193 -> 8c49257 `feat(audit): classify content-merged branches
+    into their own bucket` (9/9). Fixed 3 real defects in the brief's own Step 3 snippet before
+    committing: `reason` unbound under `set -u` on the UNSCORED/UNKNOWN arm (would abort the
+    whole scan on the first unscored branch), `local content_merged=false` shadowing the bucket
+    array `content_merged=()` (renamed the per-branch flag to `is_content_merged`), and the
+    coverage pass running for literal-ancestor branches too (guarded on `merged=false`).
+  - Note: taskferry accept partially applied again (ambient `.claude/`/`.superpowers/sdd/*`
+    untracked files choke the 3-way merge) — same recovery as Tasks 1-2: extracted the
+    bin/tests/report hunks from `taskferry result --diff`, `git apply`, verified tests
+    independently, committed manually.
+  - Fix round 1/5 (oc_msov9rzb_2ecb7447, resumed implementer session): reviewer's one Important
+    finding (execution-error) — test scenario 4 (binary-only branch, unscored-never-archaeology
+    routing) passed vacuously because the branch wasn't archaeology-eligible (3h old vs.
+    ARCHAEOLOGY_SECS=90d), so it never actually exercised the `elif [ "$unscored" = true ]`
+    ordering. Fixed by dating that scenario's commit 100 days back; fix report confirms the
+    reworked scenario genuinely fails when the elif ordering is reverted, then passes 9/9
+    restored. Committed 2a50e7c. Scoped re-review (oc_msovctvg_f2960f05): Approved, no new
+    breakage.
+  - Regression: test-archive.sh 14/14, test-coverage.sh 10/10, test-lock.sh 5/5 all still pass.
+
 Task 8: SCOPE EXPANDED 2026-08-11 (user decision) — not yet started, sequenced after Tasks 3-7.
   - Original Task 8 named only two PROSE consumers (orient-quick, finishing-a-development-branch-addendum).
     An ecosystem sweep found two CODE consumers with their own merge-detection implementations that the
