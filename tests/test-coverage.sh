@@ -66,6 +66,21 @@ git checkout -q main
 out=$(coverage_score "$PWD" main empty)
 [[ "$out" == UNSCORED* ]] && ok "O==0 unscored" || bad "O==0 not unscored: $out"
 
+echo "=== 7. criss-cross history (two merge bases) -> UNKNOWN ==="
+git checkout -qb A main
+echo A1 > a.txt; git add -A; git commit -qm A1
+A1=$(git rev-parse A)
+git checkout -q main
+echo M1 > m.txt; git add -A; git commit -qm M1
+git checkout -q A; git merge -q --no-ff main      # A absorbs main's M1
+git checkout -q main; git merge -q --no-ff "$A1"  # main absorbs the ORIGINAL A1
+echo A2 > a.txt; git checkout -q A; git add -A; git commit -qm A2
+echo M2 > m2.txt; git checkout -q main; git add -A; git commit -qm M2
+n=$(git merge-base --all main A | wc -l)
+[ "$n" -gt 1 ] && ok "criss-cross produced $n merge bases" || bad "expected >1 merge bases, got $n"
+out=$(coverage_score "$PWD" main A)
+[[ "$out" == UNKNOWN* ]] && ok "criss-cross unknown" || bad "criss-cross scored: $out"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 exit "$fail"

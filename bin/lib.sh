@@ -136,10 +136,16 @@ human_age() {
 }
 
 # Echoes the singular merge-base of two refs, or nothing on error. In a
-# criss-cross history there are MULTIPLE merge bases; `git merge-base` without
-# --all errors ("multiple merge bases") rather than pick one. A caller must
-# detect that and treat the branch as unknown. Echoes the base OID on success.
+# criss-cross history there are MULTIPLE merge bases; singular `git merge-base`
+# does not error — it picks one arbitrarily, which would score against a
+# possibly-wrong base. Count with --all first and treat >1 base as unknown.
+# Echoes the base OID on success.
 merge_base() {
+  local n
+  n=$(git merge-base --all "$1" "$2" 2>/dev/null | wc -l)
+  # >1 base = criss-cross history; singular merge-base would pick one
+  # arbitrarily and score against a possibly-wrong base. Treat as unknown.
+  [ "$n" -eq 1 ] || return 1
   git merge-base "$1" "$2" 2>/dev/null
 }
 
