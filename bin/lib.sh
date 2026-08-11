@@ -135,18 +135,19 @@ human_age() {
   fi
 }
 
-# Echoes the singular merge-base of two refs, or nothing on error. In a
+# Echoes the singular merge-base of two refs, or nothing on error. Runs every
+# git call with -C "$1" so the result never depends on the caller's cwd. In a
 # criss-cross history there are MULTIPLE merge bases; singular `git merge-base`
 # does not error — it picks one arbitrarily, which would score against a
 # possibly-wrong base. Count with --all first and treat >1 base as unknown.
 # Echoes the base OID on success.
 merge_base() {
-  local n
-  n=$(git merge-base --all "$1" "$2" 2>/dev/null | wc -l)
+  local repo="$1" base="$2" branch="$3" n
+  n=$(git -C "$repo" merge-base --all "$base" "$branch" 2>/dev/null | wc -l)
   # >1 base = criss-cross history; singular merge-base would pick one
   # arbitrarily and score against a possibly-wrong base. Treat as unknown.
   [ "$n" -eq 1 ] || return 1
-  git merge-base "$1" "$2" 2>/dev/null
+  git -C "$repo" merge-base "$base" "$branch" 2>/dev/null
 }
 
 # Sums net text lines from numstat input (added-minus-deleted). Echoes a string
@@ -173,11 +174,11 @@ numstat_net() {
 #   UNKNOWN <why>    - criss-cross history, merge conflict, merge-tree error.
 coverage_score() {
   local repo="$1" base="$2" branch="$3" mb out O R num
-  mb=$(merge_base "$base" "$branch") || { echo "UNKNOWN no-merge-base"; return; }
+  mb=$(merge_base "$repo" "$base" "$branch") || { echo "UNKNOWN no-merge-base"; return; }
   [ -n "$mb" ] || { echo "UNKNOWN no-merge-base"; return; }
 
   # O: net text lines on the branch from its merge base.
-  out=$(git diff --no-ext-diff --no-textconv --numstat --no-renames "$mb" "$branch" 2>/dev/null) || { echo "UNKNOWN branch-diff-failed"; return; }
+  out=$(git -C "$repo" diff --no-ext-diff --no-textconv --numstat --no-renames "$mb" "$branch" 2>/dev/null) || { echo "UNKNOWN branch-diff-failed"; return; }
   O=$(numstat_net <<< "$out")
   case "$O" in
     UNSCORED*) { echo "$O-in-branch"; return; } ;;

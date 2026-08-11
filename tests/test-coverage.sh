@@ -81,6 +81,15 @@ n=$(git merge-base --all main A | wc -l)
 out=$(coverage_score "$PWD" main A)
 [[ "$out" == UNKNOWN* ]] && ok "criss-cross unknown" || bad "criss-cross scored: $out"
 
+echo "=== 8. coverage_score is repo-scoped: correct verdict from a foreign cwd ==="
+git checkout -qb foreign main
+echo foreign > foreign.txt; git add -A; git commit -qm foreign
+git checkout -q main
+cd "$SCRATCH"  # deliberately NOT the target repo — the contract says $repo rules
+out=$(coverage_score "$T" main foreign)
+[[ "$out" == "SCORED 0" ]] && ok "foreign-cwd call is repo-scoped" || bad "foreign-cwd call got '$out'"
+cd "$T"
+
 echo
 echo "=== $pass passed, $fail failed ==="
 exit "$fail"
