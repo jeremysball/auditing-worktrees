@@ -26,19 +26,23 @@ detect_base() {
   fi
 }
 
+# Echoes one of: a start-time string, "missing", or "unknown".
+#   missing - the process provably does not exist (procfs absence).
+#   unknown - /proc/<pid>/stat could not be read for any other reason.
 proc_start_ticks() {
-  # Field 22 of /proc/<pid>/stat is start time in clock ticks since boot.
-  # Field 2 (comm) is parenthesized and may itself contain spaces or parens,
-  # so field-count naively and it silently shifts. Strip through the *last*
-  # ") " instead and index from there.
   local pid="$1" stat rest
-  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  # A missing /proc/<pid> only proves the process is gone when procfs itself
+  # is mounted. In a container or chroot without /proc, EVERY pid looks absent,
+  # which would turn every live lock into "stale" - i.e. into a deletion. Probe
+  # procfs first and report "unknown" when it isn't there.
+  if [ ! -d "/proc/self" ]; then echo "unknown"; return; fi
+  if [ ! -d "/proc/$pid" ]; then echo "missing"; return; fi
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || { echo "unknown"; return; }
   rest="${stat##*) }"
-  [ "$rest" != "$stat" ] || return 1
+  [ "$rest" != "$stat" ] || { echo "unknown"; return; }
   local -a f
   read -r -a f <<< "$rest"
-  # rest starts at original field 3 (state); field 22 (starttime) is index 19.
-  [ "${#f[@]}" -ge 20 ] || return 1
+  [ "${#f[@]}" -ge 20 ] || { echo "unknown"; return; }
   echo "${f[19]}"
 }
 
@@ -66,7 +70,9 @@ lock_status() {
   [[ "$reason" =~ start\ ([0-9]+) ]] && start="${BASH_REMATCH[1]}"
   if [ -z "$pid" ] || [ -z "$start" ]; then echo "unknown"; return; fi
   local live_start
-  if ! live_start=$(proc_start_ticks "$pid"); then echo "stale"; return; fi
+  live_start=$(proc_start_ticks "$pid") || { echo "unknown"; return; }
+  if [ "$live_start" = "missing" ]; then echo "stale"; return; fi
+  if [ "$live_start" = "unknown" ]; then echo "unknown"; return; fi
   if [ "$live_start" = "$start" ]; then echo "live"; else echo "stale"; fi
 }
 
@@ -132,4 +138,132 @@ human_age() {
   elif [ "$s" -lt 86400 ];  then echo "$(( s / 3600 ))h"
   else                           echo "$(( s / 86400 ))d"
   fi
+}
+
+# Echoes the singular merge-base of two refs, or nothing on error. Runs every
+# git call with -C "$1" so the result never depends on the caller's cwd. In a
+# criss-cross history there are MULTIPLE merge bases; singular `git merge-base`
+# does not error — it picks one arbitrarily, which would score against a
+# possibly-wrong base. Count with --all first and treat >1 base as unknown.
+# Echoes the base OID on success.
+merge_base() {
+  local repo="$1" base="$2" branch="$3" n
+  n=$(git -C "$repo" merge-base --all "$base" "$branch" 2>/dev/null | wc -l)
+  # >1 base = criss-cross history; singular merge-base would pick one
+  # arbitrarily and score against a possibly-wrong base. Treat as unknown.
+  [ "$n" -eq 1 ] || return 1
+  git -C "$repo" merge-base "$base" "$branch" 2>/dev/null
+}
+
+# Sums net text lines from numstat input (added-minus-deleted). Echoes a string
+# on one line:
+#   "N"            - the net line delta, when every row is a normal text row.
+#   "UNSCORED <why>" - a `- -` (binary) or `0 0` (mode-only) row appeared.
+# Reads each row TAB-aware: numstat emits `add<TAB>del<TAB>path`; a naive
+# "${row##*$'\t'}" grabs the pathname, not the delete count.
+numstat_net() {
+  local total=0 row a d p
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r a d p <<< "$row"
+    if [ "$a" = "-" ] && [ "$d" = "-" ]; then { echo "UNSCORED binary"; return; }; fi
+    if [ "$a" = "0" ] && [ "$d" = "0" ]; then { echo "UNSCORED mode-only"; return; }; fi
+    total=$(( total + a - d ))
+  done
+  echo "$total"
+}
+
+# Echoes one of:
+#   SCORED <0-100>   - the branch's net text lines that are already in base.
+#   UNSCORED <why>   - binary/mode-only row, O==0, or empty patch.
+#   UNKNOWN <why>    - criss-cross history, merge conflict, merge-tree error.
+coverage_score() {
+  local repo="$1" base="$2" branch="$3" mb out O R num
+  mb=$(merge_base "$repo" "$base" "$branch") || { echo "UNKNOWN no-merge-base"; return; }
+  [ -n "$mb" ] || { echo "UNKNOWN no-merge-base"; return; }
+
+  # O: net text lines on the branch from its merge base.
+  out=$(git -C "$repo" diff --no-ext-diff --no-textconv --numstat --no-renames "$mb" "$branch" 2>/dev/null) || { echo "UNKNOWN branch-diff-failed"; return; }
+  O=$(numstat_net <<< "$out")
+  # numstat_net already returns the documented "UNSCORED <why>" shape - echo it
+  # verbatim. Decorating it here (a suffix on one path, a second "UNSCORED "
+  # prefix on the other) produced three different strings for one verdict and
+  # broke the contract the coverage-score CLI publishes to its consumers.
+  case "$O" in
+    UNSCORED*) { echo "$O"; return; } ;;
+  esac
+  [ "$O" -gt 0 ] || { echo "UNSCORED no-text-rows"; return; }
+
+  # Simulated merge + residual diff in ONE subprocess so the synthesized tree
+  # stays reachable. Capture merge-tree's rc separately from its output, then
+  # run the diff only on success — all inside a subshell that keeps the object
+  # dir live. merge-tree rc 1 = conflict, >1 = error -> UNKNOWN.
+  local obj alt base_oid mtrc tree residual had_errexit=0
+  obj=$(mktemp -d) || { echo "UNKNOWN no-temp-dir"; return; }
+  alt=$(git -C "$repo" rev-parse --path-format=absolute --git-path objects 2>/dev/null)
+  [ -n "$alt" ] || { rm -rf "$obj"; echo "UNKNOWN no-object-dir"; return; }
+  base_oid=$(git -C "$repo" rev-parse "$base" 2>/dev/null)
+  # Restore the caller's errexit rather than forcing it on: lib.sh is sourced
+  # by consumers that deliberately run without `set -e`, and leaving errexit
+  # armed behind us turns their next tolerated failure into an abort.
+  case "$-" in *e*) had_errexit=1 ;; esac
+  set +e
+  residual=$(
+    tree=$(GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
+      git -C "$repo" merge-tree --write-tree "$base" "$branch" 2>/dev/null)
+    mtrc=$?
+    echo "RC=$mtrc"
+    # An empty tree with rc 0 must NOT fall through: exiting 0 here would leave
+    # an empty residual, which parses as R=0 and fails open to SCORED 100.
+    if [ "$mtrc" -ne 0 ] || [ -z "$tree" ]; then
+      [ "$mtrc" -ne 0 ] && exit "$mtrc"
+      exit 2
+    fi
+    GIT_OBJECT_DIRECTORY="$obj" GIT_ALTERNATE_OBJECT_DIRECTORIES="$alt" \
+      git -C "$repo" diff --no-ext-diff --no-textconv --numstat --no-renames "$base_oid" "$tree" 2>/dev/null
+  )
+  rc=$?
+  [ "$had_errexit" -eq 1 ] && set -e
+  rm -rf "$obj"
+  mtrc=$(printf '%s\n' "$residual" | grep -o '^RC=[0-9]*' | head -1 | cut -d= -f2)
+  residual=$(printf '%s\n' "$residual" | grep -v '^RC=[0-9]*' || true)
+  if [ "${mtrc:-0}" -eq 1 ]; then { echo "UNKNOWN merge-conflict"; return; }; fi
+  if [ "${mtrc:-0}" -gt 1 ] || [ "$rc" -gt 1 ]; then { echo "UNKNOWN merge-tree-error"; return; }; fi
+
+  R=$(numstat_net <<< "$residual")
+  case "$R" in
+    UNSCORED*) { echo "$R"; return; } ;;
+  esac
+
+  # R is a NET line count, so it goes negative when the branch's own deletions
+  # are missing from base (base ends up with more lines than the merged tree).
+  # Subtracting a negative R inflated the score past O - a branch whose deletion
+  # never shipped scored SCORED 111 and cleared the 95% bar. Residual work is
+  # residual work whichever direction it points, so score against its magnitude
+  # and clamp to the documented 0-100 range.
+  local absR="${R#-}"
+  num=$(( O - absR )); [ "$num" -lt 0 ] && num=0
+  local pct=$(( num * 100 / O )); [ "$pct" -gt 100 ] && pct=100
+  echo "SCORED $pct"
+}
+
+# Echoes the base-10 integer value, or "invalid". Strict decimal: rejects
+# leading zeros ("08" is invalid, not 8 — a bare Bash arithmetic read would
+# treat it as octal and silently change its meaning). Never emits a non-numeric
+# string that a caller could feed to $(( )).
+validate_pct() {
+  local val="$1"
+  case "$val" in
+    ''|*[!0-9]*) echo invalid; return ;;
+    # a leading zero with more than one digit is octal-looking -> invalid
+    '0'*) [ "$val" = "0" ] || { echo invalid; return; } ;;
+  esac
+  # Reject anything too long to be a percentage BEFORE the arithmetic read:
+  # $(( )) wraps modulo 2^64, so 18446744073709551616 would evaluate to 0 and
+  # validate as a legal threshold - turning a nonsense value into "archive
+  # everything" rather than into the intended rejection.
+  [ "${#val}" -le 3 ] || { echo invalid; return; }
+  local n
+  n=$((val))            # safe: matched ^[0-9]+$ with no leading zero
+  if [ "$n" -ge 0 ] && [ "$n" -le 100 ]; then echo "$n"; else echo invalid; fi
 }
