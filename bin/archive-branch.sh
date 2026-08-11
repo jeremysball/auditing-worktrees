@@ -4,6 +4,10 @@
 #
 # Usage: archive-branch.sh <repo-path> <branch> [<branch>...]
 #        archive-branch.sh --list <repo-path>
+#        archive-branch.sh --strict <repo-path> <branch> [<branch>...]
+#
+# --strict refuses a dirty worktree (no WIP commit) and creates the tag via a
+# verified `update-ref --stdin` transaction instead of `git tag`.
 #
 # Why a tag rather than just `git branch -D`: deleting a branch only drops the
 # ref. The commits linger as unreachable objects until gc collects them -
@@ -28,6 +32,9 @@ if [ "${1:-}" = "--list" ]; then
     "refs/tags/$ARCHIVE_PREFIX" 2>/dev/null
   exit 0
 fi
+
+STRICT=false
+if [ "${1:-}" = "--strict" ]; then STRICT=true; shift; fi
 
 REPO="${1:?usage: archive-branch.sh <repo-path> <branch> [<branch>...]}"; shift
 [ "$#" -ge 1 ] || { echo "usage: archive-branch.sh <repo-path> <branch> [<branch>...]" >&2; exit 1; }
@@ -83,6 +90,10 @@ for branch in "$@"; do
     # outright - not even reflog-recoverable. Commit first or don't touch it.
     dirty=$(worktree_dirty_count "$path")
     if [ "$dirty" -gt 0 ]; then
+      if [ "$STRICT" = true ]; then
+        echo "refusing $branch: strict mode does not archive a dirty worktree ($dirty uncommitted file(s) in $path)" >&2
+        rc=1; continue
+      fi
       echo "  $branch: committing $dirty uncommitted file(s) before archiving"
       if ! git -C "$path" add -A || \
          ! git -C "$path" commit -q -m "wip: archived with uncommitted changes"; then
@@ -98,12 +109,34 @@ for branch in "$@"; do
   fi
 
   tip=$(git rev-parse "refs/heads/$branch")
-  git tag "$tag" "refs/heads/$branch"
 
-  # Prove the parachute opened before jumping: confirm the tag resolves to the
-  # same commit the branch points at. Only then is deleting the branch safe.
-  if [ "$(git rev-parse "refs/tags/$tag^{commit}")" != "$tip" ]; then
-    echo "refusing $branch: tag $tag doesn't resolve to $tip — not deleting" >&2
+  if [ "$STRICT" = true ]; then
+    # Atomic: verify the branch still points at `tip`, then create the tag, all
+    # in one transaction. `create` takes ONE OID (ref + new-value); `verify`
+    # takes the expected old-value. Empirically verified: the whole transaction
+    # aborts (rc 128) if the verify fails, leaving the branch and the would-be
+    # tag untouched. A concurrent commit that moved the branch therefore blocks
+    # the tag entirely — no stale tag is created.
+    if ! printf 'start\nverify refs/heads/%s %s\ncreate refs/tags/%s %s\nprepare\ncommit\n' \
+        "$branch" "$tip" "$tag" "$tip" | git update-ref --stdin 2>/dev/null; then
+      echo "refusing $branch: branch moved during archive (atomic tag aborted) — not deleting" >&2
+      rc=1; continue
+    fi
+  else
+    git tag "$tag" "refs/heads/$branch"
+    if [ "$(git rev-parse "refs/tags/$tag^{commit}")" != "$tip" ]; then
+      echo "refusing $branch: tag $tag doesn't resolve to $tip — not deleting" >&2
+      rc=1; continue
+    fi
+  fi
+
+  # Close the post-tag race: the atomic transaction pinned the branch at `tip`
+  # and created the tag there, but a concurrent commit after that but before
+  # `git branch -D` would make `-D` delete the NEW tip while the tag keeps the
+  # old one, stranding the new tip unreachable. Re-verify immediately before
+  # the destructive steps (worktree remove + branch -D) that follow.
+  if [ "$(git rev-parse "refs/heads/$branch" 2>/dev/null)" != "$tip" ]; then
+    echo "refusing $branch: branch advanced after tagging (now $(git rev-parse --short refs/heads/$branch), expected $tip) — worktree/branch left in place" >&2
     rc=1; continue
   fi
 
