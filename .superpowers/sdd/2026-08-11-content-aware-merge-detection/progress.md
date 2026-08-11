@@ -104,6 +104,28 @@ Task 6: complete (commits 99a8f6f..487d206, review clean — Approved, first pas
     test-archive.sh 14/14, test-audit-content.sh 9/9, test-archive-strict.sh 10/10,
     test-clean-content-refuses.sh 2/2, test-coverage.sh 10/10, test-lock.sh 5/5.
 
+Task 7: complete (commits 56c6e7c..13c47ee, review clean — Approved, first pass)
+  - Implementer oc_msowcedb_d828d4a3 -> 13c47ee `feat(audit): validate the content-merge threshold
+    strict decimal`. Added `validate_pct` to `bin/lib.sh` (strict-decimal, base-10, 0-100, rejects
+    leading-zero-as-octal); wired it into `audit-worktrees.sh`'s `CONTENT_MERGE_THRESHOLD`, sourced
+    from `WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD` — unset -> default 95, set-but-invalid -> stderr
+    notice + fallback 95, never a silent Bash octal read/abort.
+  - Recovery note: `taskferry accept` failed the usual way (ambient `.claude/CONTINUATION*` and stray
+    review-diff files break the 3-way apply) — hand-applied only the production hunks
+    (`bin/lib.sh`, `bin/audit-worktrees.sh`, `tests/test-threshold.sh`, task-7 brief/report), verified
+    independently, committed, then `taskferry reject`ed the changeset per the established recovery.
+  - Reviewer oc_msowi3wr_1ac593e9 settled `done`/exit 0 but never reached its Assessment block or a
+    `Status:` line (trailed off mid edge-case sweep, `finalMarker: null`) — resumed the same session
+    (`--session-id`) to close it out rather than treating the truncated narration as a verdict.
+  - Test verified independently: `bash tests/test-threshold.sh` -> 5/5 pass (95 accepted; 08, empty,
+    abc, 101 rejected). Regression: test-archive.sh 14/14, test-archive-strict.sh 10/10,
+    test-audit-content.sh 9/9, test-clean-content-refuses.sh 2/2, test-coverage.sh 10/10,
+    test-hook-parse.sh 3/3, test-lock.sh 5/5 (8/8 test files total).
+  - Minor (deferred): test doesn't explicitly exercise boundary values `0`/`100` (brief's test is
+    verbatim; reviewer's own edge-case sweep confirmed both boundaries behave correctly).
+  - Minor (deferred): `validate_pct` with no argument would trip `set -u` on `local val="$1"` —
+    theoretical only, no caller in the codebase omits the argument.
+
 Task 8: SCOPE EXPANDED 2026-08-11 (user decision) — not yet started, sequenced after Tasks 3-7.
   - Original Task 8 named only two PROSE consumers (orient-quick, finishing-a-development-branch-addendum).
     An ecosystem sweep found two CODE consumers with their own merge-detection implementations that the
