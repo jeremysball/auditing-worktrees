@@ -25,3 +25,20 @@ Task 2: complete (commits 5f0e5ca..d2ea9da, tests/test-coverage.sh 10/10)
     non-ancestor (a literal ancestor yields O==0 -> UNSCORED, so the plan's "scenario 1 -> SCORED 100"
     was self-contradictory); `|| true` added to the residual `grep -v` (it exits 1 on a clean merge,
     which under `set -e` aborted the common case).
+
+Task 8: SCOPE EXPANDED 2026-08-11 (user decision) — not yet started, sequenced after Tasks 3-7.
+  - Original Task 8 named only two PROSE consumers (orient-quick, finishing-a-development-branch-addendum).
+    An ecosystem sweep found two CODE consumers with their own merge-detection implementations that the
+    plan never touched: `orient/bin/scan-active.sh` (ancestry + exact tip-tree match; feeds `orient` AND
+    `jeeves` via git-state.md) and `jeeves/bin/todos.py::_landed` (ancestry, then a GitHub API round-trip).
+  - Gap proven empirically, not inferred: branch cut -> main advances -> branch squash-merged defeats BOTH
+    ancestry and tip-tree match (tip tree = old-main+changes, squash tree = new-main+changes, never equal),
+    while coverage_score returns SCORED 100. So orient and jeeves report that branch outstanding today.
+  - USER DECISION (sharing mechanism): consumers source lib.sh via
+    `${AUDIT_WORKTREES_LIB:-$HOME/.claude/skills/auditing-worktrees/bin/lib.sh}` and MUST degrade to their
+    current behaviour when it is absent (`declare -F coverage_score`). Rejected: a new shared repo (too much
+    churn, reopens reviewed Task 2 code) and vendoring copies (the cause of the 4-implementation sprawl).
+  - USER DECISION (sequencing): after Tasks 3-7, because coverage_score's contract is unproven until Task 3
+    wires the first real caller. Documented now so it survives a context loss.
+  - New sub-steps 3a-3e added to the plan, incl. a `bin/coverage-score` CLI entry point (todos.py is Python
+    and cannot source a Bash function) and an explicit check that clean-safe.sh is NOT changed.
