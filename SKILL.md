@@ -128,6 +128,12 @@ The report now distinguishes three merge states, not two (see `docs/design.md`,
 - **Unscored** — a binary/mode-only change, a merge-tree conflict or error, or criss-cross
   history made the line-count coverage meaningless. Sent to needs-triage/unknown, never
   auto-cleaned or auto-archived.
+- **Scored below threshold** — the coverage score ran and returned a concrete percentage
+  below the content-merge threshold (e.g. `SCORED 0`), which *proves* the branch's work is
+  NOT in base. Surfaced in the needs-triage line as `unmerged, SCORED <pct>`. This is the
+  strongest "genuinely outstanding" signal the report can give — treat it as open work that
+  needs a merge/PR/archive decision, not as a maybe-landed branch. (The score is only dropped
+  when it clears the threshold, which routes to content-merged instead.)
 
 For each **content-merged** item, the work is already in base — it is a squash-merge false
 positive, not open work. Group every content-merged branch into one archive-and-delete confirmation using

@@ -112,7 +112,16 @@ audit_repo() {
       case "$score" in
         SCORED*)
           local pct="${score#SCORED }"
-          if [ "$pct" -ge "$CONTENT_MERGE_THRESHOLD" ]; then is_content_merged=true; fi
+          if [ "$pct" -ge "$CONTENT_MERGE_THRESHOLD" ]; then
+            is_content_merged=true
+          else
+            # Below threshold: the branch's work is provably NOT in base (e.g.
+            # SCORED 0 = nothing landed). Surface the score so the triage line
+            # distinguishes "genuinely outstanding" from "might have landed" —
+            # dropping it here made every SCORED-0 branch read as a bare
+            # "unmerged" with no signal, which is the case the tool exists for.
+            reason="$reason, SCORED $pct"
+          fi
           ;;
         UNSCORED*|UNKNOWN*)
           # Unscored / unknown -> cannot prove it shipped. It must go to
