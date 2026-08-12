@@ -150,6 +150,16 @@ manual backstop for a branch the report missed, `git diff <branch> <suspected-la
 --stat` still tells you whether its lines shipped under a different hash — an empty diff means the
 work is already in base and that branch belongs with the content-merged archive batch above.
 
+If the repo carries a `working-set` label (see `scaffolding-repos`), check it
+before treating a branch as abandoned: `gh-axi issue list --label working-set`
+and `gh-axi pr list --label working-set`. A branch whose issue or PR is still
+in that set is claimed work, however idle it looks — report it, don't offer it
+up for cleanup. The reverse doesn't hold: an unlabeled branch isn't
+automatically stale, since the label is hand-maintained and easy to forget.
+While you're there, strip `working-set` from anything the sweep confirms has
+merged — this pass is the natural place to catch labels that outlived their
+work.
+
 For every branch that's genuinely still open, resolve it with the same options
 `finishing-a-development-branch` uses for one branch — inlined here so a triage sweep doesn't
 have to leave this skill to close each one out:
