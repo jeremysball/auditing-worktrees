@@ -50,6 +50,10 @@ git checkout -q main
 out=$("$BIN/audit-worktrees.sh" "$T")
 printf '%s' "$out" | grep -q "needs-triage" && ok "other in needs-triage" || bad "other not in needs-triage: $out"
 printf '%s' "$out" | grep -q "other" && ok "other named in report" || bad "other missing from report: $out"
+# The SCORED 0 must be surfaced, not dropped: a below-threshold score proves the
+# work is NOT in base, which is the strongest "genuinely outstanding" signal the
+# report can give. A bare "unmerged" (no score) would hide that distinction.
+printf '%s' "$out" | grep -q "SCORED 0" && ok "SCORED 0 surfaced for genuinely-unmerged branch" || bad "SCORED 0 not surfaced: $out"
 
 echo "=== 4. binary-only branch (UNSCORED) routes to needs-triage, never archaeology ==="
 # The commit must be archaeology-eligible (older than ARCHAEOLOGY_SECS, never
