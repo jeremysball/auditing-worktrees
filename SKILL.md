@@ -127,13 +127,29 @@ The report now distinguishes three merge states, not two (see `docs/design.md`,
   `likely-content-merged` heading.
 - **Unscored** — a binary/mode-only change, a merge-tree conflict or error, or criss-cross
   history made the line-count coverage meaningless. Sent to needs-triage/unknown, never
-  auto-cleaned or auto-archived.
+  auto-cleaned or auto-archived. The triage line carries the full verdict plus a plain-words
+  hint (e.g. `unmerged, UNSCORED binary (binary-only change, text can't be compared,
+  needs a human call)`).
 - **Scored below threshold** — the coverage score ran and returned a concrete percentage
   below the content-merge threshold (e.g. `SCORED 0`), which *proves* the branch's work is
-  NOT in base. Surfaced in the needs-triage line as `unmerged, SCORED <pct>`. This is the
+  NOT in base. Surfaced in the needs-triage line as `unmerged, SCORED <pct> (only <pct>% of
+  its lines are in base)`. This is the
   strongest "genuinely outstanding" signal the report can give — treat it as open work that
   needs a merge/PR/archive decision, not as a maybe-landed branch. (The score is only dropped
   when it clears the threshold, which routes to content-merged instead.)
+
+Three more line shapes to know when reading a report:
+
+- `upstream ref absent locally`: the branch's configured upstream ref is missing from
+  local tracking refs. That covers a deleted remote branch and a never-pushed branch, but
+  also a stale tracking ref. The remote branch can still exist when no fetch has refreshed
+  it, and the audit never fetches, so the label deliberately says nothing about the remote.
+- `(primary checkout (<base>): N uncommitted file(s), ...)`: uncommitted files in the
+  primary checkout belong to no branch, so no per-branch line ever shows them. A dirty
+  primary prints this parenthetical even when every other bucket is empty.
+- `(archive-branch: X archived, Y skipped, Z refused)`: every `archive-branch.sh` run
+  ends with this trailer on stdout, so a run that did nothing is still distinguishable
+  from a run that never happened.
 
 For each **content-merged** item, the work is already in base — it is a squash-merge false
 positive, not open work. Group every content-merged branch into one archive-and-delete confirmation using

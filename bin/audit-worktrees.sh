@@ -120,15 +120,29 @@ audit_repo() {
             # distinguishes "genuinely outstanding" from "might have landed" —
             # dropping it here made every SCORED-0 branch read as a bare
             # "unmerged" with no signal, which is the case the tool exists for.
-            reason="$reason, SCORED $pct"
+            # The parenthetical states what the number means so the reader
+            # doesn't have to remember the scoring contract to act on it.
+            reason="$reason, SCORED $pct (only $pct% of its lines are in base)"
           fi
           ;;
         UNSCORED*|UNKNOWN*)
           # Unscored / unknown -> cannot prove it shipped. It must go to
           # needs-triage, NEVER archaeology (never batch-archived) and never
-          # clean-safe. Record the flag so the split below forces triage.
+          # clean-safe. Record the full verdict plus a plain-words hint: the
+          # bare flag ("UNSCORED", "UNKNOWN") gave no hint toward action, and
+          # the old ${score%% *} form dropped the why ("binary") entirely.
           unscored=true
-          reason="$reason, ${score%% *}"
+          local hint=""
+          case "$score" in
+            "UNSCORED binary")       hint="binary-only change, text can't be compared" ;;
+            "UNSCORED mode-only")    hint="mode-only change, nothing to compare" ;;
+            "UNSCORED no-text-rows") hint="no text lines to compare" ;;
+            "UNKNOWN merge-conflict") hint="conflicts with base" ;;
+            "UNKNOWN no-merge-base")  hint="no common history with base" ;;
+            UNKNOWN*)                 hint="comparison against base failed" ;;
+            UNSCORED*)                hint="can't be scored" ;;
+          esac
+          reason="$reason, $score ($hint, needs a human call)"
           ;;
       esac
     fi
@@ -162,7 +176,16 @@ audit_repo() {
       fi
     else
       [ "$status" = "stale" ] && reason="unmerged, stale lock (dead session)"
-      [ -n "${gone[$branch]:-}" ] && reason="$reason, upstream deleted"
+      # The label states the local cache fact, nothing about the remote: the
+      # configured upstream ref is absent from refs/remotes. That covers
+      # "remote branch deleted" and "never pushed anywhere", but also a
+      # tracking ref that simply went stale. The remote branch can still
+      # exist (proven live via ls-remote) when no fetch has refreshed the
+      # ref. The audit never fetches (report-only), so it must not assert
+      # remote absence. Saying "deleted" implied someone destroyed something;
+      # saying "gone" still implied the remote copy was gone. A branch with
+      # no upstream configured at all takes neither label.
+      [ -n "${gone[$branch]:-}" ] && reason="$reason, upstream ref absent locally"
       [ "$dirty" -gt 0 ] && reason="$reason, $dirty uncommitted file(s)"
 
       if [ "$is_content_merged" = true ]; then
@@ -193,14 +216,20 @@ audit_repo() {
     esac
   done < <(git worktree list --porcelain)
 
-  if [ "$any" -eq 0 ] && [ ${#prunable[@]} -eq 0 ]; then
+  # Uncommitted files in the primary checkout belong to no branch, so the
+  # per-branch dirty counts above never see them. A dirty primary used to be
+  # invisible to the report entirely.
+  local primary_dirty
+  primary_dirty=$(git status --porcelain 2>/dev/null | wc -l)
+
+  if [ "$any" -eq 0 ] && [ ${#prunable[@]} -eq 0 ] && [ "$primary_dirty" -eq 0 ]; then
     return
   fi
   # Nothing actionable and nothing dangling: stay quiet rather than printing a
   # header for a repo whose only branches are in flight.
   if [ ${#safe[@]} -eq 0 ] && [ ${#triage[@]} -eq 0 ] && [ ${#archaeology[@]} -eq 0 ] \
      && [ ${#handsoff[@]} -eq 0 ] && [ ${#unknown_merge[@]} -eq 0 ] && [ ${#prunable[@]} -eq 0 ] \
-     && [ ${#content_merged[@]} -eq 0 ]; then
+     && [ ${#content_merged[@]} -eq 0 ] && [ "$primary_dirty" -eq 0 ]; then
     return
   fi
 
@@ -232,6 +261,11 @@ audit_repo() {
   if [ ${#prunable[@]} -gt 0 ]; then
     echo "  dangling worktree registrations (git worktree prune is safe):"
     printf '    %s\n' "${prunable[@]}"
+  fi
+  # Parenthetical, not a bucket heading: the summary parser clears its current
+  # bucket on parenthetical lines, so this can never inflate a bucket count.
+  if [ "$primary_dirty" -gt 0 ]; then
+    echo "  (primary checkout ($base): $primary_dirty uncommitted file(s), not on any branch, never auto-touched)"
   fi
   if [ "$inflight_count" -gt 0 ]; then
     echo "  ($inflight_count in flight, active within $(human_age "$IN_FLIGHT_SECS") — hidden)"
