@@ -50,13 +50,13 @@ BASE=$(detect_base)
 # removed and its branch can't be deleted while checked out.
 PRIMARY=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
 
-rc=0
+rc=0 ok=0 skipped=0
 for branch in "$@"; do
   if [ "$branch" = "$BASE" ]; then
     echo "refusing $branch: this is the base branch" >&2; rc=1; continue
   fi
   if ! git show-ref --verify --quiet "refs/heads/$branch"; then
-    echo "skip $branch: no such local branch" >&2; continue
+    echo "skip $branch: no such local branch" >&2; skipped=$((skipped+1)); continue
   fi
 
   path=$(worktree_path_for_branch "$branch")
@@ -156,7 +156,12 @@ for branch in "$@"; do
   fi
 
   echo "  archived $branch -> $tag ($(git rev-parse --short "$tip"))"
+  ok=$((ok+1))
 done
 
+# Trailer: a run that prints nothing is indistinguishable from a run that never
+# happened, which once hid a fully-skipped batch. $# still counts the branch
+# args here (only the repo path was shifted off), so refused falls out.
+echo "  (archive-branch: $ok archived, $skipped skipped, $(( $# - ok - skipped )) refused)"
 git worktree prune
 exit "$rc"
