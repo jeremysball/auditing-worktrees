@@ -132,7 +132,7 @@ audit_repo() {
           # bare flag ("UNSCORED", "UNKNOWN") gave no hint toward action, and
           # the old ${score%% *} form dropped the why ("binary") entirely.
           unscored=true
-          local hint
+          local hint=""
           case "$score" in
             "UNSCORED binary")       hint="binary-only change, text can't be compared" ;;
             "UNSCORED mode-only")    hint="mode-only change, nothing to compare" ;;
@@ -176,11 +176,16 @@ audit_repo() {
       fi
     else
       [ "$status" = "stale" ] && reason="unmerged, stale lock (dead session)"
-      # "gone" is a state, not an event: the configured upstream ref is absent,
-      # which covers both "remote branch deleted" and "never pushed anywhere".
-      # Saying "deleted" implied someone destroyed something and caused a
-      # false alarm; the local commits are intact either way.
-      [ -n "${gone[$branch]:-}" ] && reason="$reason, upstream gone"
+      # The label states the local cache fact, nothing about the remote: the
+      # configured upstream ref is absent from refs/remotes. That covers
+      # "remote branch deleted" and "never pushed anywhere", but also a
+      # tracking ref that simply went stale. The remote branch can still
+      # exist (proven live via ls-remote) when no fetch has refreshed the
+      # ref. The audit never fetches (report-only), so it must not assert
+      # remote absence. Saying "deleted" implied someone destroyed something;
+      # saying "gone" still implied the remote copy was gone. A branch with
+      # no upstream configured at all takes neither label.
+      [ -n "${gone[$branch]:-}" ] && reason="$reason, upstream ref absent locally"
       [ "$dirty" -gt 0 ] && reason="$reason, $dirty uncommitted file(s)"
 
       if [ "$is_content_merged" = true ]; then

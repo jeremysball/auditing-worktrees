@@ -233,7 +233,7 @@ files, 91 days idle.
 
 ## Error handling
 
-- A repo with no worktrees beyond its primary checkout is skipped silently — nothing to report.
+- A repo with no worktrees beyond its primary checkout is skipped silently, nothing to report. (A dirty primary still reports: the primary checkout line is independent of the branch buckets.)
 - A repo where `merge-base` fails (unrelated histories, detached-HEAD base) is flagged as
   "couldn't determine merge state," not guessed at.
 

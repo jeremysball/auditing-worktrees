@@ -161,7 +161,8 @@ done
 
 # Trailer: a run that prints nothing is indistinguishable from a run that never
 # happened, which once hid a fully-skipped batch. $# still counts the branch
-# args here (only the repo path was shifted off), so refused falls out.
+# args here (all flag and repo-path args were shifted off above), so refused
+# falls out.
 echo "  (archive-branch: $ok archived, $skipped skipped, $(( $# - ok - skipped )) refused)"
 git worktree prune
 exit "$rc"
