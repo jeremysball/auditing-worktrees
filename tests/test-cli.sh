@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 CLI="$BIN/coverage-score"
 

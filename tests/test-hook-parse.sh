@@ -2,6 +2,7 @@
 # Feeds a realistic report body through the real summary parser and checks the
 # bucket assignment. Exercises production code, not a copied awk program.
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 # shellcheck source=../bin/summary-parser.sh
 source "$BIN/summary-parser.sh"

@@ -5,6 +5,7 @@
 # needs-triage (never archaeology, never clean-safe).
 # Usage: tests/test-audit-content.sh   (exits non-zero on any failure)
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 
 SCRATCH=$(mktemp -d); trap 'rm -rf "$SCRATCH"' EXIT

@@ -3,6 +3,7 @@
 # the silent archive run, and hint-less SCORED/UNSCORED lines.
 # Usage: tests/test-report-clarity.sh   (exits non-zero on any failure)
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 
 # Scratch repos are single-checkout /tmp dirs, never anyone's primary

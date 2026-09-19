@@ -2,6 +2,7 @@
 # Exercises archive-branch.sh --strict's safety properties in a throwaway repo.
 # Usage: tests/test-archive-strict.sh   (exits non-zero on any failure)
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 
 # The strict dirty-check (scenario 1) and the atomic tag transaction

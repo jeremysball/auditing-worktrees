@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Regression tests for the shared machinery used by git-drain-worktrees.
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 source "$BIN/lib.sh"
