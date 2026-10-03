@@ -69,6 +69,25 @@ git show-ref --verify --quiet refs/tags/archive/dirty-work && ok "tag created" |
 got=$(git show archive/dirty-work:scratch.txt 2>/dev/null)
 [ "$got" = "UNCOMMITTED PRECIOUS" ] && ok "uncommitted file preserved in tag" || bad "uncommitted file LOST (got '$got')"
 
+echo "=== 5b. dirty+old worktree in a repo whose commit-msg hook enforces Conventional Commits ==="
+# The archive commit must pass a Conventional Commits commit-msg hook; a
+# "wip:" subject was rejected there and blocked the archive outright.
+mkdir -p "$SCRATCH/hooks"
+cat > "$SCRATCH/hooks/commit-msg" <<'HOOK'
+#!/usr/bin/env bash
+head -n1 "$1" | grep -qE '^(feat|fix|chore|docs|refactor|test|style|perf|build|ci)(\([^)]+\))?!?: ' || exit 1
+HOOK
+chmod +x "$SCRATCH/hooks/commit-msg"
+mk_branch hooked-work stuff "$OLD"
+git worktree add -q "$WT/wt-hooked" hooked-work
+echo "HOOKED PRECIOUS" > "$WT/wt-hooked/scratch.txt"
+touch -d "28 days ago" "$WT/wt-hooked/scratch.txt"
+git config core.hooksPath "$SCRATCH/hooks"   # after setup: the fixture's own commits aren't conventional
+"$BIN/archive-branch.sh" "$T" hooked-work; check "archives dirty+old past the hook" 0 $?
+got=$(git show archive/hooked-work:scratch.txt 2>/dev/null)
+[ "$got" = "HOOKED PRECIOUS" ] && ok "uncommitted file preserved in tag" || bad "uncommitted file LOST (got '$got')"
+git config --unset core.hooksPath
+
 echo "=== 6. dirty+fresh worktree is refused, not committed ==="
 # mtime must beat commit date: committed 3h ago, edited just now = active.
 mk_branch dirty-fresh stuff2 "$OLD"
