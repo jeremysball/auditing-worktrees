@@ -96,7 +96,7 @@ for branch in "$@"; do
       fi
       echo "  $branch: committing $dirty uncommitted file(s) before archiving"
       if ! git -C "$path" add -A || \
-         ! git -C "$path" commit -q -m "wip: archived with uncommitted changes"; then
+         ! git -C "$path" commit -q -m "chore: archive uncommitted changes"; then
         echo "refusing $branch: couldn't commit its uncommitted changes — not deleting anything" >&2
         rc=1; continue
       fi

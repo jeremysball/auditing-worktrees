@@ -66,7 +66,7 @@ minutes ago but edited 2 minutes ago is *active*, and a worktree left dirty for 
 **2. A tag saves commits, not uncommitted files.** Archiving a dirty worktree must commit first.
 `git tag` + `git branch -D` + `git worktree remove` on a dirty tree destroys the uncommitted
 files outright, and unlike a deleted branch they aren't even reflog-recoverable.
-`archive-branch.sh` commits them as `wip: archived with uncommitted changes` before tagging, and
+`archive-branch.sh` commits them as `chore: archive uncommitted changes` before tagging, and
 refuses to delete anything if that commit fails.
 
 ## Step 2: Present the report, get confirmation

@@ -190,7 +190,7 @@ branch view.
 would be a lie. Uncommitted changes are in no commit, so the tag doesn't capture them and
 `git worktree remove` destroys them outright — not even reflog-recoverable. omnisearch had 4 such
 files sitting for 28 days, i.e. the hazard was live in the workspace, not hypothetical.
-`archive-branch.sh` therefore commits a dirty worktree as `wip: archived with uncommitted
+`archive-branch.sh` therefore commits a dirty worktree as `chore: archive uncommitted
 changes` *before* tagging, and refuses to delete anything if that commit fails.
 
 The tag is also verified to resolve to the branch tip before the branch is deleted — prove the
@@ -338,7 +338,7 @@ archived, so a wrong coverage call costs a mislabeled tag, not lost work.
 Two changes to `archive-branch.sh`:
 
 **Strict content-archive mode refuses a dirty worktree** rather than committing WIP. The current
-generic path commits a dirty tree as `wip: archived with uncommitted changes` before tagging
+generic path commits a dirty tree as `chore: archive uncommitted changes` before tagging
 ("A tag saves commits, not uncommitted files" — see the Archive tags section). For the
 content-aware archive path, that WIP commit is wrong: it fabricates history for files that were
 never in a real commit and silently changes the meaning of what's preserved. Strict mode refuses
