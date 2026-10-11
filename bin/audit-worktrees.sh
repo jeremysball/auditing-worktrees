@@ -26,18 +26,7 @@ for arg in "$@"; do
 done
 ROOT="${POSITIONAL[0]:-$(pwd)}"
 
-if [ -z "${WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD+x}" ]; then
-  CONTENT_MERGE_THRESHOLD=95                     # unset -> default
-else
-  CONTENT_MERGE_THRESHOLD=$(validate_pct "$WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD")
-  # 0 validates as a percentage but is not a legal threshold here: `pct >= 0`
-  # is true for SCORED 0, i.e. for a branch whose work is provably NOT in base,
-  # so a 0 threshold offers every open branch for batch archive.
-  if [ "$CONTENT_MERGE_THRESHOLD" = "invalid" ] || [ "$CONTENT_MERGE_THRESHOLD" = "0" ]; then
-    echo "  (skipped: WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD must be an integer 1-100 with no leading zero, got '$WORKTREE_AUDIT_CONTENT_MERGE_THRESHOLD')" >&2
-    CONTENT_MERGE_THRESHOLD=95
-  fi
-fi
+CONTENT_MERGE_THRESHOLD=$(content_merge_threshold)
 
 audit_repo() {
   local repo="$1"
@@ -50,20 +39,21 @@ audit_repo() {
     return
   fi
 
-  # branch -> worktree path, from porcelain worktree list. Parsed line-by-line
-  # (not word-split) so paths containing spaces survive intact.
+  # branch -> worktree path and dangling registrations from the shared,
+  # NUL-safe snapshot. Drain and audit must not grow separate porcelain parsers.
   declare -A wt_path=()
-  local cur_path="" cur_branch=""
-  while IFS= read -r line; do
-    case "$line" in
-      "worktree "*) cur_path="${line#worktree }"; cur_branch="" ;;
-      "branch "*) cur_branch="${line#branch refs/heads/}" ;;
-      "")
-        if [ -n "$cur_branch" ]; then wt_path["$cur_branch"]="$cur_path"; fi
-        cur_path=""; cur_branch=""
-        ;;
-    esac
-  done < <(git worktree list --porcelain; echo "")
+  local -a prunable=()
+  worktree_snapshot "$repo" || {
+    echo "  (skipped: couldn't read worktree registrations)"
+    return
+  }
+  local i
+  for i in "${!WORKTREE_PATHS[@]}"; do
+    if [ "${WORKTREE_BRANCHES[$i]}" != HEAD ]; then
+      wt_path["${WORKTREE_BRANCHES[$i]}"]="${WORKTREE_PATHS[$i]}"
+    fi
+    [ -n "${WORKTREE_PRUNABLES[$i]}" ] && prunable+=("${WORKTREE_PATHS[$i]}")
+  done
 
   # Upstream state via for-each-ref's own fields rather than grepping
   # human-oriented `branch -vv` text (which can false-match a commit subject
@@ -94,38 +84,33 @@ audit_repo() {
       continue
     fi
 
-    local merge_rc=0
-    git merge-base --is-ancestor "$branch" "$base" 2>/dev/null || merge_rc=$?
-    # exit 1 = definitively not an ancestor (unmerged); >1 = real error
-    # (unrelated histories, bad ref, etc.) - don't guess, flag it.
-    if [ "$merge_rc" -gt 1 ]; then
+    local merge_state
+    merge_state=$(classify_branch "$repo" "$branch" "$base")
+    if [ "$merge_state" = UNKNOWN ]; then
       unknown_merge+=("$branch")
       continue
     fi
     local merged=true
-    [ "$merge_rc" -eq 1 ] && merged=false
+    [ "$merge_state" = OUTSTANDING ] && merged=false
 
     local is_content_merged=false unscored=false reason="unmerged"
     if [ "$NO_CONTENT" = false ] && [ "$merged" = false ]; then
-      local score
-      score=$(coverage_score "$repo" "$base" "$branch")
-      case "$score" in
-        SCORED*)
+      local landed score
+      IFS=$'\t' read -r landed score <<<"$(content_landed "$repo" "$base" "$branch" "$CONTENT_MERGE_THRESHOLD")"
+      case "$landed" in
+        yes) is_content_merged=true ;;
+      no)
           local pct="${score#SCORED }"
-          if [ "$pct" -ge "$CONTENT_MERGE_THRESHOLD" ]; then
-            is_content_merged=true
-          else
-            # Below threshold: the branch's work is provably NOT in base (e.g.
-            # SCORED 0 = nothing landed). Surface the score so the triage line
-            # distinguishes "genuinely outstanding" from "might have landed" —
-            # dropping it here made every SCORED-0 branch read as a bare
-            # "unmerged" with no signal, which is the case the tool exists for.
-            # The parenthetical states what the number means so the reader
-            # doesn't have to remember the scoring contract to act on it.
+          # Below threshold: the branch's work is provably NOT in base (e.g.
+          # SCORED 0 = nothing landed). Surface the score so the triage line
+          # distinguishes "genuinely outstanding" from "might have landed" —
+          # dropping it here made every SCORED-0 branch read as a bare
+          # "unmerged" with no signal, which is the case the tool exists for.
+          # The parenthetical states what the number means so the reader
+          # doesn't have to remember the scoring contract to act on it.
             reason="$reason, SCORED $pct (only $pct% of its lines are in base)"
-          fi
           ;;
-        UNSCORED*|UNKNOWN*)
+        unknown)
           # Unscored / unknown -> cannot prove it shipped. It must go to
           # needs-triage, NEVER archaeology (never batch-archived) and never
           # clean-safe. Record the full verdict plus a plain-words hint: the
@@ -206,21 +191,11 @@ audit_repo() {
     fi
   done < <(git for-each-ref refs/heads --format='%(refname:short)')
 
-  # Dangling worktree registrations (prunable): report, don't touch.
-  # Porcelain emits "prunable <reason>", not a bare "prunable" line.
-  local -a prunable=()
-  while IFS= read -r line; do
-    case "$line" in
-      "worktree "*) cur_path="${line#worktree }" ;;
-      "prunable"*) prunable+=("$cur_path") ;;
-    esac
-  done < <(git worktree list --porcelain)
-
   # Uncommitted files in the primary checkout belong to no branch, so the
   # per-branch dirty counts above never see them. A dirty primary used to be
   # invisible to the report entirely.
   local primary_dirty
-  primary_dirty=$(git status --porcelain 2>/dev/null | wc -l)
+  primary_dirty=$(worktree_dirty_count "${WORKTREE_PATHS[0]}")
 
   if [ "$any" -eq 0 ] && [ ${#prunable[@]} -eq 0 ] && [ "$primary_dirty" -eq 0 ]; then
     return

@@ -3,24 +3,56 @@
 # into base, 0 commits ahead, clean, idle, unlocked or stale-locked. Re-verifies
 # every branch itself right before deleting; never trusts a stale report.
 #
-# Usage: clean-safe.sh <repo-path> <branch-name> [<branch-name>...]
+# Usage: clean-safe.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch-name> [<branch-name>...]
 
 set -euo pipefail
 
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-REPO="${1:?usage: clean-safe.sh <repo-path> <branch> [<branch>...]}"; shift
+BASE_REF_INPUT=""
+EXPECTED_TIP=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --base-ref)
+      [ "$#" -ge 2 ] || { echo "usage: clean-safe.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]" >&2; exit 1; }
+      BASE_REF_INPUT="$2"; shift 2 ;;
+    --expected-tip)
+      [ "$#" -ge 2 ] || { echo "usage: clean-safe.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]" >&2; exit 1; }
+      EXPECTED_TIP="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+REPO="${1:?usage: clean-safe.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]}"; shift
 [ "$#" -ge 1 ] || { echo "usage: clean-safe.sh <repo-path> <branch> [<branch>...]" >&2; exit 1; }
 
 cd "$REPO"
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-BASE=$(detect_base)
-[ -n "$BASE" ] || { echo "refusing: can't determine base branch for $REPO_ROOT" >&2; exit 1; }
+if [ -n "$BASE_REF_INPUT" ]; then
+  BASE_REF="$BASE_REF_INPUT"
+  git rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || {
+    echo "refusing: base ref $BASE_REF does not resolve in $REPO_ROOT" >&2
+    exit 1
+  }
+else
+  BASE=$(detect_base)
+  [ -n "$BASE" ] || { echo "refusing: can't determine base branch for $REPO_ROOT" >&2; exit 1; }
+  BASE_REF="refs/heads/$BASE"
+  git rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || {
+    BASE_REF="$BASE"
+  }
+fi
+BASE=$(base_branch_from_ref "$BASE_REF") || {
+  echo "refusing: can't determine base branch for $BASE_REF" >&2
+  exit 1
+}
 
-PRIMARY=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+PRIMARY=$(worktree_primary_path "$REPO_ROOT") || {
+  echo "refusing: can't determine primary worktree for $REPO_ROOT" >&2
+  exit 1
+}
 
 rc=0
 for branch in "$@"; do
@@ -33,13 +65,22 @@ for branch in "$@"; do
   fi
 
   merge_rc=0
-  git merge-base --is-ancestor "$branch" "$BASE" 2>/dev/null || merge_rc=$?
+  git merge-base --is-ancestor "refs/heads/$branch" "$BASE_REF" 2>/dev/null || merge_rc=$?
   if [ "$merge_rc" -ne 0 ]; then
     echo "refusing $branch: not confirmed merged into $BASE (re-check gave exit $merge_rc) — do not delete" >&2
     rc=1; continue
   fi
 
-  path=$(worktree_path_for_branch "$branch")
+  path=$(worktree_path_for_branch "$branch" "$REPO_ROOT")
+
+  tip=$(git rev-parse --verify --quiet "refs/heads/$branch^{commit}") || {
+    echo "refusing $branch: branch tip could not be read" >&2
+    rc=1; continue
+  }
+  if [ -n "$EXPECTED_TIP" ] && [ "$tip" != "$EXPECTED_TIP" ]; then
+    echo "refusing $branch: branch moved (expected $EXPECTED_TIP, found $tip)" >&2
+    rc=1; continue
+  fi
 
   if [ -n "$path" ] && [ "$path" = "$PRIMARY" ]; then
     echo "refusing $branch: checked out in the primary worktree ($path)" >&2
@@ -73,7 +114,14 @@ for branch in "$@"; do
       fi
       git worktree unlock "$path"
     fi
-    git worktree remove "$path"
+    if [ -n "$EXPECTED_TIP" ]; then
+      verified=$(verify_worktree_unchanged "$REPO_ROOT" "$path" "$branch" "$EXPECTED_TIP")
+      if [ "$verified" != yes ]; then
+        echo "refusing $branch: worktree changed or is not clean ($verified)" >&2
+        rc=1; continue
+      fi
+    fi
+    git worktree remove -- "$path"
   fi
 
   # -d (not -D): still refuses if the branch's own upstream tracking ref has
@@ -83,6 +131,19 @@ for branch in "$@"; do
   # this guard, `set -e` kills the whole loop and every later branch in the
   # batch silently never gets processed. The worktree (if any) is already gone
   # by this point; only the branch ref itself is left for manual follow-up.
+  if [ -n "$EXPECTED_TIP" ]; then
+    current_tip=$(git rev-parse --verify --quiet "refs/heads/$branch^{commit}") || current_tip=""
+    if [ "$current_tip" != "$EXPECTED_TIP" ]; then
+      echo "refusing $branch: branch advanced after worktree removal (expected $EXPECTED_TIP, found ${current_tip:-missing})" >&2
+      rc=1; continue
+    fi
+    if ! printf 'start\ndelete refs/heads/%s %s\nprepare\ncommit\n' \
+        "$branch" "$EXPECTED_TIP" | git update-ref --stdin 2>/dev/null; then
+      echo "refusing $branch: branch moved during deletion; branch ref left for manual review" >&2
+      rc=1; continue
+    fi
+    continue
+  fi
   if ! git branch -d "$branch"; then
     echo "refusing $branch: git branch -d declined (see message above) — worktree removed, branch ref left for manual review" >&2
     rc=1; continue

@@ -3,6 +3,7 @@
 # reproduces a specific misclassification the review turned up, so a future
 # change that reintroduces one fails here rather than in someone's worktree.
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 source "$BIN/lib.sh"
 source "$BIN/summary-parser.sh"

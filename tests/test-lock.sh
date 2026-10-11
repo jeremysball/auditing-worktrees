@@ -2,6 +2,7 @@
 # Exercises lock_status's three-way liveness in a throwaway repo.
 # Usage: tests/test-lock.sh   (exits non-zero on any failure)
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 source "$BIN/lib.sh"
 

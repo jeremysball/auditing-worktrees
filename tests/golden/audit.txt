@@ -1,0 +1,8 @@
+=== <SCRATCH>/repo (base: main) ===
+  safe-to-clean (merged, clean):
+    merged  [idle <AGE>]
+  needs-triage:
+    unlanded  (worktree: <SCRATCH>/wt/unlanded)  [idle <AGE>] — unmerged, SCORED 0 (only 0% of its lines are in base), 1 uncommitted file(s)
+  likely-content-merged (work already in base under a different hash — batch archive):
+    squashed  [idle <AGE>] — content-merged (work already in base, different hash)
+  (primary checkout (main): 1 uncommitted file(s), not on any branch, never auto-touched)

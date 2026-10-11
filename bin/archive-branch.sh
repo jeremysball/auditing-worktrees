@@ -2,9 +2,9 @@
 # Archives unmerged branches: preserves their commits under a permanent tag,
 # then removes the branch and its worktree.
 #
-# Usage: archive-branch.sh <repo-path> <branch> [<branch>...]
+# Usage: archive-branch.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]
 #        archive-branch.sh --list <repo-path>
-#        archive-branch.sh --strict <repo-path> <branch> [<branch>...]
+#        archive-branch.sh --strict [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]
 #
 # --strict refuses a dirty worktree (no WIP commit) and creates the tag via a
 # verified `update-ref --stdin` transaction instead of `git tag`.
@@ -34,21 +34,51 @@ if [ "${1:-}" = "--list" ]; then
 fi
 
 STRICT=false
-if [ "${1:-}" = "--strict" ]; then STRICT=true; shift; fi
+BASE_REF_INPUT=""
+EXPECTED_TIP=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --strict) STRICT=true; shift ;;
+    --base-ref)
+      [ "$#" -ge 2 ] || { echo "usage: archive-branch.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]" >&2; exit 1; }
+      BASE_REF_INPUT="$2"; shift 2 ;;
+    --expected-tip)
+      [ "$#" -ge 2 ] || { echo "usage: archive-branch.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]" >&2; exit 1; }
+      EXPECTED_TIP="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
 
-REPO="${1:?usage: archive-branch.sh <repo-path> <branch> [<branch>...]}"; shift
+REPO="${1:?usage: archive-branch.sh [--base-ref <ref>] [--expected-tip <oid>] <repo-path> <branch> [<branch>...]}"; shift
 [ "$#" -ge 1 ] || { echo "usage: archive-branch.sh <repo-path> <branch> [<branch>...]" >&2; exit 1; }
 
 cd "$REPO"
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-BASE=$(detect_base)
-[ -n "$BASE" ] || { echo "refusing: can't determine base branch for $REPO_ROOT" >&2; exit 1; }
+if [ -n "$BASE_REF_INPUT" ]; then
+  BASE_REF="$BASE_REF_INPUT"
+  git rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || {
+    echo "refusing: base ref $BASE_REF does not resolve in $REPO_ROOT" >&2
+    exit 1
+  }
+else
+  BASE=$(detect_base)
+  [ -n "$BASE" ] || { echo "refusing: can't determine base branch for $REPO_ROOT" >&2; exit 1; }
+  BASE_REF="refs/heads/$BASE"
+  git rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null || BASE_REF="$BASE"
+fi
+BASE=$(base_branch_from_ref "$BASE_REF") || {
+  echo "refusing: can't determine base branch for $BASE_REF" >&2
+  exit 1
+}
 
-# The primary worktree is the first entry git lists. Its checkout can't be
+# The primary worktree is the first entry Git lists. Its checkout can't be
 # removed and its branch can't be deleted while checked out.
-PRIMARY=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+PRIMARY=$(worktree_primary_path "$REPO_ROOT") || {
+  echo "refusing: can't determine primary worktree for $REPO_ROOT" >&2
+  exit 1
+}
 
 rc=0 ok=0 skipped=0
 for branch in "$@"; do
@@ -59,7 +89,7 @@ for branch in "$@"; do
     echo "skip $branch: no such local branch" >&2; skipped=$((skipped+1)); continue
   fi
 
-  path=$(worktree_path_for_branch "$branch")
+  path=$(worktree_path_for_branch "$branch" "$REPO_ROOT")
 
   # Never switch someone's main checkout out from under them.
   if [ -n "$path" ] && [ "$path" = "$PRIMARY" ]; then
@@ -79,9 +109,9 @@ for branch in "$@"; do
     gitdir=$(worktree_gitdir "$path") || gitdir=""
     if [ -n "$gitdir" ] && [ -f "$gitdir/locked" ]; then
       status=$(lock_status "$gitdir/locked")
-      if [ "$status" != "stale" ]; then
-        echo "refusing $branch: worktree lock is $status, not provably dead" >&2
-        rc=1; continue
+    if [ "$status" != "stale" ]; then
+      echo "refusing $branch: worktree lock is $status, not provably dead" >&2
+      rc=1; continue
       fi
     fi
 
@@ -103,12 +133,24 @@ for branch in "$@"; do
     fi
   fi
 
+  tip=$(git rev-parse "refs/heads/$branch")
+  if [ -n "$EXPECTED_TIP" ] && [ "$tip" != "$EXPECTED_TIP" ]; then
+    echo "refusing $branch: branch moved (expected $EXPECTED_TIP, found $tip)" >&2
+    rc=1; continue
+  fi
+
+  if [ -n "$EXPECTED_TIP" ] && [ -n "$path" ]; then
+    verified=$(verify_worktree_unchanged "$REPO_ROOT" "$path" "$branch" "$EXPECTED_TIP")
+    if [ "$verified" != yes ]; then
+      echo "refusing $branch: worktree changed or is not clean ($verified)" >&2
+      rc=1; continue
+    fi
+  fi
+
   tag="$ARCHIVE_PREFIX/$branch"
   if git show-ref --verify --quiet "refs/tags/$tag"; then
     echo "refusing $branch: tag $tag already exists" >&2; rc=1; continue
   fi
-
-  tip=$(git rev-parse "refs/heads/$branch")
 
   if [ "$STRICT" = true ]; then
     # Atomic: verify the branch still points at `tip`, then create the tag, all
@@ -133,7 +175,7 @@ for branch in "$@"; do
   # Fail early and loudly if the branch already moved, so we don't tear down a
   # worktree we're then going to refuse to finish deleting.
   if [ "$(git rev-parse "refs/heads/$branch" 2>/dev/null)" != "$tip" ]; then
-    echo "refusing $branch: branch advanced after tagging (now $(git rev-parse --short refs/heads/$branch), expected $tip) — worktree/branch left in place" >&2
+    echo "refusing $branch: branch advanced after tagging (now $(git rev-parse --short "refs/heads/$branch"), expected $tip) — worktree/branch left in place" >&2
     rc=1; continue
   fi
 

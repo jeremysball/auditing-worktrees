@@ -2,6 +2,7 @@
 # Exercises archive-branch.sh's safety properties in a throwaway repo.
 # Usage: tests/test-archive.sh   (exits non-zero on any failure)
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
 
